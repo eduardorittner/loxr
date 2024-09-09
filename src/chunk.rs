@@ -22,6 +22,8 @@ pub enum OpCode {
     OpPop,
     OpDefGlobal,
     OpGetGlobal,
+    OpDefLocal,
+    OpGetLocal,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +84,8 @@ impl std::fmt::Display for OpCode {
             OpCode::OpPop => write!(f, "OP_POP"),
             OpCode::OpDefGlobal => write!(f, "OP_DEF_GLOBAL"),
             OpCode::OpGetGlobal => write!(f, "OP_GET_GLOBAL"),
+            OpCode::OpDefLocal => write!(f, "OP_DEF_LOCAL"),
+            OpCode::OpGetLocal => write!(f, "OP_GET_LOCAL"),
         }
     }
 }
@@ -119,6 +123,8 @@ impl std::fmt::Display for Chunk {
                 OpCode::OpPop => write!(f, "{}", OpCode::OpPop),
                 OpCode::OpDefGlobal => write!(f, "{}", OpCode::OpDefGlobal),
                 OpCode::OpGetGlobal => write!(f, "{}", OpCode::OpGetGlobal),
+                OpCode::OpDefLocal => write!(f, "{}", OpCode::OpDefLocal),
+                OpCode::OpGetLocal => write!(f, "{}", OpCode::OpGetLocal),
             };
             let _ = writeln!(f);
         }
@@ -180,13 +186,21 @@ impl Chunk {
         (self.values.len() - 1) as u8
     }
 
-    pub fn push_defvar(&mut self, index: u8) {
-        self.push_opcode(OpCode::OpDefGlobal);
+    pub fn push_defvar(&mut self, index: u8, code: OpCode) {
+        match code {
+            OpCode::OpDefGlobal => self.push_opcode(OpCode::OpDefGlobal),
+            OpCode::OpDefLocal => self.push_opcode(OpCode::OpDefLocal),
+            _ => unreachable!(),
+        }
         self.code.push(ByteCode { index });
     }
 
-    pub fn push_getvar(&mut self, index: u8) {
-        self.push_opcode(OpCode::OpGetGlobal);
+    pub fn push_getvar(&mut self, index: u8, code: OpCode) {
+        match code {
+            OpCode::OpGetGlobal => self.push_opcode(OpCode::OpGetGlobal),
+            OpCode::OpGetLocal => self.push_opcode(OpCode::OpGetLocal),
+            _ => unreachable!(),
+        }
         self.code.push(ByteCode { index });
     }
 
@@ -196,6 +210,10 @@ impl Chunk {
 
     pub fn code_at(&self, i: u8) -> OpCode {
         unsafe { self.code.get_unchecked(i as usize).as_op() }
+    }
+
+    pub fn index_at(&self, i: u8) -> u8 {
+        unsafe { self.code.get_unchecked(i as usize).as_index() }
     }
 
     pub fn const_at(&self, i: u8) -> Value {

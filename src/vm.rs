@@ -68,6 +68,15 @@ impl Vm {
         byte
     }
 
+    fn read_index(&mut self) -> u8 {
+        let byte = self.code.index_at(self.pc);
+        if self.pc > 254 {
+            panic!("Overflow of chunk")
+        }
+        self.pc += 1;
+        byte
+    }
+
     fn print_stack(&self) {
         let mut s = String::new();
         for value in &self.stack {
@@ -190,6 +199,16 @@ impl Vm {
                     Some(value) => self.stack.push(value.clone()),
                     None => return Err(miette::miette!("Global variable {name} not defined")),
                 }
+            }
+            OpCode::OpDefLocal => {
+                let index = self.read_index();
+                let new_val = self.stack.last().unwrap().clone();
+                *self.stack.get_mut(index as usize).unwrap() = new_val;
+            }
+            OpCode::OpGetLocal => {
+                let index = self.read_index();
+                self.stack
+                    .push(self.stack.get(index as usize).unwrap().clone());
             }
         };
         Ok(false)
@@ -378,5 +397,40 @@ mod tests {
         let mut vm = Vm::with_chunk(code);
         let res = vm.run_exact(4);
         assert!(res.is_err())
+    }
+
+    #[test]
+    pub fn var() {
+        let mut code = Chunk::new();
+        code.push_const(Value::String("myvar".to_string()));
+        code.push_opconst(Value::Number(1.));
+        code.push_defvar(0, OpCode::OpDefGlobal);
+        code.push_opconst(Value::Number(5.));
+        code.push_getvar(0, OpCode::OpGetGlobal);
+        code.push_opcode(OpCode::OpMultiply);
+        code.push_opcode(OpCode::OpReturn);
+        let mut vm = Vm::with_chunk(code);
+        let res = vm.run_exact(5).unwrap();
+        assert_eq!(res, Value::Number(5.));
+    }
+
+    #[test]
+    pub fn strings_var_add() {
+        let mut code = Chunk::new();
+        code.push_const(Value::String("myvar".to_string()));
+        code.push_opconst(Value::String("hello, ".to_string()));
+        code.push_defvar(0, OpCode::OpDefGlobal);
+
+        code.push_const(Value::String("mysecondvar".to_string()));
+        code.push_opconst(Value::String("world!".to_string()));
+        code.push_defvar(1, OpCode::OpDefGlobal);
+
+        code.push_getvar(0, OpCode::OpGetGlobal);
+        code.push_getvar(1, OpCode::OpGetGlobal);
+        code.push_opcode(OpCode::OpAdd);
+        code.push_opcode(OpCode::OpReturn);
+        let mut vm = Vm::with_chunk(code);
+        let res = vm.run_exact(8).unwrap();
+        assert_eq!(res, Value::String("hello, world!".to_string()));
     }
 }

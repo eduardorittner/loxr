@@ -2,7 +2,7 @@ use crate::{lex::Token, lex::TokenKind, Chunk, Lexer, OpCode, Value};
 use miette::{LabeledSpan, WrapErr};
 use std::collections::HashMap;
 
-type ParseFn<'de> = fn(&mut Parser<'de>, Token, bool) -> miette::Result<()>;
+type ParseFn<'de> = fn(&mut Parser<'de>, Token<'de>, bool) -> miette::Result<()>;
 
 #[derive(Debug, PartialEq, PartialOrd, Eq)]
 struct ParseRule<'de> {
@@ -16,6 +16,49 @@ pub struct Parser<'de> {
     whole: &'de str,
     chunk: &'de mut Chunk,
     rules: HashMap<TokenKind, ParseRule<'de>>,
+    scope: Scope<'de>,
+}
+
+#[derive(Debug)]
+struct Local<'de> {
+    name: &'de str,
+    depth: u8, // Supports at max 256 nested scopes
+}
+
+#[derive(Debug)]
+struct Scope<'de> {
+    locals: Vec<Local<'de>>,
+    scope_depth: u8,
+}
+
+impl<'de> Scope<'de> {
+    fn new() -> Self {
+        Self {
+            locals: Vec::new(),
+            scope_depth: 0,
+        }
+    }
+
+    fn add_local(&mut self, name: &'de str) {
+        if self.locals.len() as u8 == u8::MAX {
+            panic!("Exceeded 256 local variables!");
+        }
+        self.locals.push(Local::new(name, self.scope_depth))
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+    }
+}
+
+impl<'de> Local<'de> {
+    fn new(name: &'de str, depth: u8) -> Self {
+        Self { name, depth }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq)]
@@ -59,6 +102,7 @@ impl<'de> Parser<'de> {
             lexer: Lexer::new(input),
             whole: input,
             chunk,
+            scope: Scope::new(),
             rules: HashMap::from([
                 (
                     LeftParen,
@@ -360,6 +404,22 @@ impl<'de> Parser<'de> {
         }
     }
 
+    fn end_scope(&mut self) {
+        let local_vars = self
+            .scope
+            .locals
+            .iter()
+            .take_while(|x| x.depth == self.scope.scope_depth);
+
+        let n = local_vars.fold(0, |acc: usize, x| {
+            self.chunk.push_opcode(OpCode::OpPop);
+            acc + 1
+        });
+
+        self.scope.locals.truncate(self.scope.locals.len() - n);
+        self.scope.end_scope();
+    }
+
     fn get_rule(&self, kind: TokenKind) -> &ParseRule<'de> {
         self.rules
             .get(&kind)
@@ -411,30 +471,78 @@ impl<'de> Parser<'de> {
             .lexer
             .expect(TokenKind::Semicolon, "Expected ';' after expression")?;
 
-        self.chunk.push_defvar(index);
+        self.define_var(index);
         Ok(())
     }
 
-    fn parse_ident(&mut self, token: Token, can_assign: bool) -> miette::Result<()> {
-        let index = self.parse_variable(token, can_assign)?;
+    fn define_var(&mut self, index: Option<u8>) {
+        match index {
+            Some(index) => self.chunk.push_defvar(index, OpCode::OpDefGlobal),
+            None => (),
+        }
+    }
+
+    fn resolve_local_var(&mut self, token: Token) -> Option<u8> {
+        self.scope
+            .locals
+            .iter()
+            .position(|x| x.name == token.source)
+            .map(|x| x as u8)
+    }
+
+    fn parse_ident(&mut self, token: Token<'de>, can_assign: bool) -> miette::Result<()> {
+        let (index, set_op, get_op) = if let Some(index) = self.resolve_local_var(token) {
+            (Some(index), OpCode::OpDefLocal, OpCode::OpGetLocal)
+        } else {
+            (
+                self.parse_variable(token, can_assign)?,
+                OpCode::OpDefGlobal,
+                OpCode::OpGetGlobal,
+            )
+        };
 
         match token.kind {
             TokenKind::Eq => {
                 if can_assign {
                     self.parse_expr()?;
-                    self.chunk.push_defvar(index);
+                    self.chunk.push_defvar(index.unwrap(), get_op)
                 };
             }
             _ => {
-                self.chunk.push_getvar(index);
+                self.chunk.push_getvar(index.unwrap(), get_op);
             }
         };
         Ok(())
     }
 
-    fn parse_variable(&mut self, token: Token, _: bool) -> miette::Result<u8> {
+    fn declare_var(&mut self, token: Token<'de>) -> miette::Result<()> {
+        if self.scope.scope_depth == 0 {
+            return Ok(());
+        }
+        if self
+            .scope
+            .locals
+            .iter()
+            .fold(false, |_, e| e.name == token.source)
+        {
+            return Err(miette::miette!(
+                "A variable with the name \"{}\" already exists",
+                token.source
+            ));
+        }
+
+        self.scope.add_local(&token.source);
+        Ok(())
+    }
+
+    // TODO: Return u8 instead of Option<u8>
+    fn parse_variable(&mut self, token: Token<'de>, _: bool) -> miette::Result<Option<u8>> {
         self.chunk.push_const(Value::String(token.to_string()));
-        Ok(self.chunk.last_const())
+        self.declare_var(token)?;
+        if self.scope.scope_depth > 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.chunk.last_const()))
     }
 
     fn parse_statement(&mut self) -> miette::Result<()> {
@@ -444,9 +552,32 @@ impl<'de> Parser<'de> {
                 self.lexer.next();
                 self.print_statement()?;
             }
+            TokenKind::LeftBracket => {
+                self.lexer.next();
+                self.scope.begin_scope();
+                self.parse_block()?;
+                self.end_scope();
+            }
             _ => self.parse_expr_statement()?,
         };
         Ok(())
+    }
+
+    fn parse_block(&mut self) -> miette::Result<()> {
+        loop {
+            let token = self.lexer.peek();
+            match token {
+                Some(Ok(token)) => {
+                    if token.kind == TokenKind::RightBracket {
+                        let _ = self.lexer.next();
+                        return Ok(());
+                    }
+                    self.parse_decl()?;
+                }
+                Some(Err(_)) => return Err(miette::miette!("couldn't parse thing inside block")),
+                None => return Err(miette::miette!("Expected '}}' after block")),
+            }
+        }
     }
 
     fn parse_expr_statement(&mut self) -> miette::Result<()> {
@@ -769,7 +900,7 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_const(Value::String("eita".to_string()));
         expected.push_opconst(Value::Number(1.));
-        expected.push_defvar(0);
+        expected.push_defvar(0, OpCode::OpDefGlobal);
         expected.push_opcode(OpCode::OpReturn);
 
         let mut chunk = Chunk::new();
@@ -784,11 +915,11 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_const(Value::String("eita".to_string()));
         expected.push_opconst(Value::Number(1.));
-        expected.push_defvar(0);
+        expected.push_defvar(0, OpCode::OpDefGlobal);
         // We have to add "eita" again since everytime a variable
         // is encountered we add it to the constants table
         expected.push_const(Value::String("eita".to_string()));
-        expected.push_getvar(2);
+        expected.push_getvar(2, OpCode::OpGetGlobal);
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 

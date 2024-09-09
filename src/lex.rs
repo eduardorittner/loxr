@@ -50,6 +50,7 @@ pub enum TokenKind {
     Nil,
     Or,
     Return,
+    Print,
     Super,
     This,
     True,
@@ -113,6 +114,7 @@ impl Hash for TokenKind {
             True => state.write_u8(34),
             Var => state.write_u8(35),
             While => state.write_u8(36),
+            Print => state.write_u8(37),
         }
     }
 }
@@ -121,43 +123,44 @@ impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = self.source;
         match self.kind {
-            LeftParen => write!(f, "LEFTPAREN {source} null"),
-            RightParen => write!(f, "RIGHTPAREN {source} null"),
-            LeftBracket => write!(f, "LEFTBRACKET {source} null"),
-            RightBracket => write!(f, "RIGHTBRACKET {source} null"),
-            Comma => write!(f, "COMMA {source} null"),
-            Dot => write!(f, "DOT {source} null"),
-            Minus => write!(f, "MINUS {source} null"),
-            Plus => write!(f, "PLUS {source} null"),
-            Semicolon => write!(f, "SEMICOLON {source} null"),
-            Star => write!(f, "STAR {source} null"),
-            Slash => write!(f, "SLASH {source} null"),
-            Bang => write!(f, "BANG {source} null"),
-            Eq => write!(f, "EQ {source} null"),
-            Less => write!(f, "LESS {source} null"),
-            Greater => write!(f, "GREATER {source} null"),
-            BangEq => write!(f, "BANG_EQ {source} null"),
-            EqEq => write!(f, "EQ_EQ {source} null"),
-            LessEq => write!(f, "LESS_EQ {source} null"),
-            GreaterEq => write!(f, "GREATER_EQ {source} null"),
-            TString => write!(f, "STRING {source} (todo unescaped string)"),
-            Number(n) => write!(f, "NUMBER {source} {n}"),
-            Ident => write!(f, "IDENTIFIER {source} null"),
-            TokenKind::And => write!(f, "AND {source} null"),
-            TokenKind::Class => write!(f, "CLASS {source} null"),
-            TokenKind::Else => write!(f, "ELSE {source} null"),
-            TokenKind::False => write!(f, "FALSE {source} null"),
-            TokenKind::For => write!(f, "FOR {source} null"),
-            TokenKind::Fun => write!(f, "FUN {source} null"),
-            TokenKind::If => write!(f, "IF {source} null"),
-            TokenKind::Nil => write!(f, "NIL {source} null"),
-            TokenKind::Or => write!(f, "OR {source} null"),
-            TokenKind::Return => write!(f, "RETURN {source} null"),
-            TokenKind::Super => write!(f, "SUPER {source} null"),
-            TokenKind::This => write!(f, "THIS {source} null"),
-            TokenKind::True => write!(f, "TRUE {source} null"),
-            TokenKind::Var => write!(f, "VAR {source} null"),
-            TokenKind::While => write!(f, "WHILE {source} null"),
+            LeftParen => write!(f, "{source}"),
+            RightParen => write!(f, "{source}"),
+            LeftBracket => write!(f, "{source}"),
+            RightBracket => write!(f, "{source}"),
+            Comma => write!(f, "{source}"),
+            Dot => write!(f, "{source}"),
+            Minus => write!(f, "{source}"),
+            Plus => write!(f, "{source}"),
+            Semicolon => write!(f, "{source}"),
+            Star => write!(f, "{source}"),
+            Slash => write!(f, "{source}"),
+            Bang => write!(f, "{source}"),
+            Eq => write!(f, "{source}"),
+            Less => write!(f, "{source}"),
+            Greater => write!(f, "{source}"),
+            BangEq => write!(f, "{source}"),
+            EqEq => write!(f, "{source}"),
+            LessEq => write!(f, "{source}"),
+            GreaterEq => write!(f, "{source}"),
+            TString => write!(f, "{source}"),
+            Number(_) => write!(f, "{source}"),
+            Ident => write!(f, "{source}"),
+            TokenKind::And => write!(f, "{source}"),
+            TokenKind::Class => write!(f, "{source}"),
+            TokenKind::Else => write!(f, "{source}"),
+            TokenKind::False => write!(f, "{source}"),
+            TokenKind::For => write!(f, "{source}"),
+            TokenKind::Fun => write!(f, "{source}"),
+            TokenKind::If => write!(f, "{source}"),
+            TokenKind::Nil => write!(f, "{source}"),
+            TokenKind::Or => write!(f, "{source}"),
+            TokenKind::Return => write!(f, "{source}"),
+            TokenKind::Super => write!(f, "{source}"),
+            TokenKind::This => write!(f, "{source}"),
+            TokenKind::True => write!(f, "{source}"),
+            TokenKind::Var => write!(f, "{source}"),
+            TokenKind::While => write!(f, "{source}"),
+            TokenKind::Print => write!(f, "{source}"),
         }
     }
 }
@@ -180,13 +183,7 @@ impl<'de> Lexer<'de> {
     }
 
     pub fn expect_number(&mut self, unexpected: &str) -> miette::Result<Token<'de>> {
-        self.expect_where(
-            |t| match t.kind {
-                TokenKind::Number(_) => true,
-                _ => false,
-            },
-            unexpected,
-        )
+        self.expect_where(|t| matches!(t.kind, TokenKind::Number(_)), unexpected)
     }
 
     pub fn expect(&mut self, expected: TokenKind, unexpected: &str) -> miette::Result<Token<'de>> {
@@ -206,10 +203,14 @@ impl<'de> Lexer<'de> {
                 "{unexpected}"
             }.with_source_code(self.whole.to_string())),
             Some(Err(e)) => Err(e),
-            None => Err(Eof.into()),
+            None => Err(miette::miette!{
+                labels = vec![LabeledSpan::at(self.offset - 1..self.offset, "here")], 
+                "{unexpected}",
+            }.with_source_code(self.whole.to_string())),
         }
     }
 
+    // TODO: this is wrong
     pub fn peek(&mut self) -> Option<&Result<Token<'de>, miette::Error>> {
         if self.peeked.is_some() {
             return self.peeked.as_ref();
@@ -224,6 +225,9 @@ impl<'de> Iterator for Lexer<'de> {
     type Item = Result<Token<'de>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(next) = self.peeked.take() {
+            return Some(next);
+        }
         loop {
             let mut chars = self.rest.chars();
             let c = chars.next()?;
@@ -302,7 +306,7 @@ impl<'de> Iterator for Lexer<'de> {
                 Started::Ident => {
                     let first_non_ident = c_onwards
                         .find(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' | '0'..='9'))
-                        .unwrap_or_else(|| c_onwards.len());
+                        .unwrap_or(c_onwards.len());
 
                     let lit = &c_onwards[..first_non_ident];
                     let lit_offset = lit.len() - c.len_utf8();
@@ -325,6 +329,7 @@ impl<'de> Iterator for Lexer<'de> {
                         "true" => True,
                         "var" => Var,
                         "while" => While,
+                        "print" => Print,
                         _ => Ident,
                     };
 
@@ -336,15 +341,15 @@ impl<'de> Iterator for Lexer<'de> {
                 }
                 Started::Number => {
                     let first_non_num = c_onwards
-                        .find(|c| !matches!(c, '0'..='9'))
-                        .unwrap_or_else(|| c_onwards.len());
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(c_onwards.len());
 
                     let lit = if c_onwards[first_non_num..].starts_with('.')
-                        && c_onwards[first_non_num + 1..].starts_with(|c| matches!(c, '0'..='9'))
+                        && c_onwards[first_non_num + 1..].starts_with(|c: char| c.is_ascii_digit())
                     {
                         let second_non_num = c_onwards[first_non_num + 1..]
-                            .find(|c| !matches!(c, '0'..='9'))
-                            .unwrap_or_else(|| c_onwards[first_non_num + 1..].len());
+                            .find(|c: char| !c.is_ascii_digit())
+                            .unwrap_or(c_onwards[first_non_num + 1..].len());
                         &c_onwards[..first_non_num + second_non_num + 1]
                     } else {
                         &c_onwards[..first_non_num]

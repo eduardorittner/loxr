@@ -7,13 +7,21 @@ pub enum OpCode {
     OpReturn,
     OpConstant,
     OpNegate,
+    OpNot,
     OpAdd,
     OpSubtract,
     OpMultiply,
     OpDivide,
     OpNil,
     OpTrue,
+    OpEq,
+    OpGreater,
+    OpLess,
     OpFalse,
+    OpPrint,
+    OpPop,
+    OpDefGlobal,
+    OpGetGlobal,
 }
 
 #[derive(Clone, Copy)]
@@ -43,12 +51,12 @@ impl ByteCode {
         unsafe { self.index }
     }
 
-    fn constant(&self, constants: &Vec<Value>) -> Value {
+    fn constant(&self, constants: &[Value]) -> Value {
         // This is safe since we only store indices of values that
         // exist, and never mutate any indices
         unsafe {
             let index = self.index;
-            *constants.get_unchecked(index as usize)
+            constants.get_unchecked(index as usize).clone()
         }
     }
 }
@@ -59,6 +67,7 @@ impl std::fmt::Display for OpCode {
             OpCode::OpReturn => write!(f, "OP_RETURN"),
             OpCode::OpConstant => write!(f, "OP_CONSTANT"),
             OpCode::OpNegate => write!(f, "OP_NEGATE"),
+            OpCode::OpNot => write!(f, "OP_NOT"),
             OpCode::OpAdd => write!(f, "OP_ADD"),
             OpCode::OpSubtract => write!(f, "OP_SUBTRACT"),
             OpCode::OpMultiply => write!(f, "OP_MULTIPLY"),
@@ -66,6 +75,13 @@ impl std::fmt::Display for OpCode {
             OpCode::OpNil => write!(f, "OP_NIL"),
             OpCode::OpTrue => write!(f, "OP_TRUE"),
             OpCode::OpFalse => write!(f, "OP_FALSE"),
+            OpCode::OpEq => write!(f, "OP_EQUAL"),
+            OpCode::OpGreater => write!(f, "OP_GREATER"),
+            OpCode::OpLess => write!(f, "OP_LESS"),
+            OpCode::OpPrint => write!(f, "OP_PRINT"),
+            OpCode::OpPop => write!(f, "OP_POP"),
+            OpCode::OpDefGlobal => write!(f, "OP_DEF_GLOBAL"),
+            OpCode::OpGetGlobal => write!(f, "OP_GET_GLOBAL"),
         }
     }
 }
@@ -88,6 +104,7 @@ impl std::fmt::Display for Chunk {
                     )
                 }
                 OpCode::OpNegate => write!(f, "{}", OpCode::OpNegate),
+                OpCode::OpNot => write!(f, "{}", OpCode::OpNot),
                 OpCode::OpAdd => write!(f, "{}", OpCode::OpAdd),
                 OpCode::OpSubtract => write!(f, "{}", OpCode::OpSubtract),
                 OpCode::OpMultiply => write!(f, "{}", OpCode::OpMultiply),
@@ -95,8 +112,15 @@ impl std::fmt::Display for Chunk {
                 OpCode::OpNil => write!(f, "{}", OpCode::OpNil),
                 OpCode::OpTrue => write!(f, "{}", OpCode::OpTrue),
                 OpCode::OpFalse => write!(f, "{}", OpCode::OpFalse),
+                OpCode::OpEq => write!(f, "{}", OpCode::OpEq),
+                OpCode::OpGreater => write!(f, "{}", OpCode::OpGreater),
+                OpCode::OpLess => write!(f, "{}", OpCode::OpLess),
+                OpCode::OpPrint => write!(f, "{}", OpCode::OpPrint),
+                OpCode::OpPop => write!(f, "{}", OpCode::OpPop),
+                OpCode::OpDefGlobal => write!(f, "{}", OpCode::OpDefGlobal),
+                OpCode::OpGetGlobal => write!(f, "{}", OpCode::OpGetGlobal),
             };
-            let _ = write!(f, "\n");
+            let _ = writeln!(f);
         }
         Ok(())
     }
@@ -106,6 +130,12 @@ impl std::fmt::Display for Chunk {
 pub struct Chunk {
     code: Vec<ByteCode>,
     values: Vec<Value>,
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Chunk::new()
+    }
 }
 
 impl Chunk {
@@ -120,21 +150,44 @@ impl Chunk {
         self.code.push(ByteCode { code: c });
     }
 
-    pub fn push_const(&mut self, c: Value) {
-        self.code.push(ByteCode {
-            code: OpCode::OpConstant,
-        });
-        self.code.push(ByteCode {
-            index: self.values.len() as u8,
-        });
-        self.values.push(c);
+    pub fn push_opcodes(&mut self, c1: OpCode, c2: OpCode) {
+        self.code.push(ByteCode { code: c1 });
+        self.code.push(ByteCode { code: c2 });
+    }
 
+    pub fn push_const(&mut self, c: Value) {
+        self.values.push(c);
         // TODO: Add OP_CONSTANT_LONG that is followed by
         // 3 bytes to represent the index, so the max size
         // of self.values would be ~16 million
         if self.values.len() > 256 {
             panic!("Overflow in vec of constants!")
         }
+    }
+
+    pub fn push_opconst(&mut self, c: Value) {
+        self.code.push(ByteCode {
+            code: OpCode::OpConstant,
+        });
+        self.code.push(ByteCode {
+            index: self.values.len() as u8,
+        });
+        self.push_const(c);
+    }
+
+    // Maybe return an Option?
+    pub fn last_const(&self) -> u8 {
+        (self.values.len() - 1) as u8
+    }
+
+    pub fn push_defvar(&mut self, index: u8) {
+        self.push_opcode(OpCode::OpDefGlobal);
+        self.code.push(ByteCode { index });
+    }
+
+    pub fn push_getvar(&mut self, index: u8) {
+        self.push_opcode(OpCode::OpGetGlobal);
+        self.code.push(ByteCode { index });
     }
 
     pub fn push_return(&mut self) {

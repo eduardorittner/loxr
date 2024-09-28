@@ -23,6 +23,7 @@ pub struct Parser<'de> {
 struct Local<'de> {
     name: &'de str,
     depth: u8, // Supports at max 256 nested scopes
+    defined: bool,
 }
 
 #[derive(Debug)]
@@ -53,11 +54,19 @@ impl<'de> Scope<'de> {
     fn end_scope(&mut self) {
         self.scope_depth -= 1;
     }
+
+    fn init(&mut self) {
+        self.locals.last_mut().unwrap().defined = true;
+    }
 }
 
 impl<'de> Local<'de> {
     fn new(name: &'de str, depth: u8) -> Self {
-        Self { name, depth }
+        Self {
+            name,
+            depth,
+            defined: false,
+        }
     }
 }
 
@@ -284,8 +293,8 @@ impl<'de> Parser<'de> {
                     And,
                     ParseRule {
                         prefix: None,
-                        infix: None,
-                        prec: Precedence::None,
+                        infix: Some(Parser::parse_and),
+                        prec: Precedence::And,
                     },
                 ),
                 (
@@ -348,8 +357,8 @@ impl<'de> Parser<'de> {
                     Or,
                     ParseRule {
                         prefix: None,
-                        infix: None,
-                        prec: Precedence::None,
+                        infix: Some(Parser::parse_or),
+                        prec: Precedence::Or,
                     },
                 ),
                 (
@@ -409,6 +418,7 @@ impl<'de> Parser<'de> {
             .scope
             .locals
             .iter()
+            .rev()
             .take_while(|x| x.depth == self.scope.scope_depth);
 
         let n = local_vars.fold(0, |acc: usize, x| {
@@ -456,6 +466,7 @@ impl<'de> Parser<'de> {
             .lexer
             .expect(TokenKind::Ident, "Expected identifier after 'var' keyword")?;
 
+        // Declare variable with the following name
         let index = self.parse_variable(token, true)?;
 
         // TODO: miette error reporting
@@ -482,30 +493,49 @@ impl<'de> Parser<'de> {
         }
     }
 
-    fn resolve_local_var(&mut self, token: Token) -> Option<u8> {
-        self.scope
+    fn resolve_local_var(&mut self, token: Token) -> miette::Result<Option<u8>> {
+        let index = self
+            .scope
             .locals
             .iter()
-            .position(|x| x.name == token.source)
-            .map(|x| x as u8)
+            .rev()
+            .position(|x| x.name == token.source);
+
+        match index {
+            Some(index) => {
+                let index = self.scope.locals.len() - 1 - index;
+                if !self.scope.locals.get(index).unwrap().defined {
+                    return Err(miette::miette!(
+                        "Can't read local variable in its own initializer"
+                    ));
+                } else {
+                    Ok(Some(index as u8))
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     fn parse_ident(&mut self, token: Token<'de>, can_assign: bool) -> miette::Result<()> {
-        let (index, set_op, get_op) = if let Some(index) = self.resolve_local_var(token) {
+        let (index, set_op, get_op) = if let Some(index) = self.resolve_local_var(token)? {
             (Some(index), OpCode::OpDefLocal, OpCode::OpGetLocal)
         } else {
             (
-                self.parse_variable(token, can_assign)?,
+                // Find the variable with the following name
+                Some(self.global_variable(token, can_assign)),
                 OpCode::OpDefGlobal,
                 OpCode::OpGetGlobal,
             )
         };
 
+        let token = self.lexer.peek().unwrap().as_ref().unwrap();
+
         match token.kind {
             TokenKind::Eq => {
                 if can_assign {
+                    self.lexer.next();
                     self.parse_expr()?;
-                    self.chunk.push_defvar(index.unwrap(), get_op)
+                    self.chunk.push_defvar(index.unwrap(), set_op)
                 };
             }
             _ => {
@@ -519,12 +549,9 @@ impl<'de> Parser<'de> {
         if self.scope.scope_depth == 0 {
             return Ok(());
         }
-        if self
-            .scope
-            .locals
-            .iter()
-            .fold(false, |_, e| e.name == token.source)
-        {
+        if self.scope.locals.iter().fold(false, |_, e| {
+            e.name == token.source && e.depth == self.scope.scope_depth
+        }) {
             return Err(miette::miette!(
                 "A variable with the name \"{}\" already exists",
                 token.source
@@ -535,14 +562,18 @@ impl<'de> Parser<'de> {
         Ok(())
     }
 
-    // TODO: Return u8 instead of Option<u8>
-    fn parse_variable(&mut self, token: Token<'de>, _: bool) -> miette::Result<Option<u8>> {
-        self.chunk.push_const(Value::String(token.to_string()));
+    fn parse_variable(&mut self, token: Token<'de>, b: bool) -> miette::Result<Option<u8>> {
         self.declare_var(token)?;
         if self.scope.scope_depth > 0 {
+            self.scope.init();
             return Ok(None);
         }
-        Ok(Some(self.chunk.last_const()))
+        Ok(Some(self.global_variable(token, b)))
+    }
+
+    fn global_variable(&mut self, token: Token<'de>, _: bool) -> u8 {
+        self.chunk.push_const(Value::String(token.to_string()));
+        self.chunk.last_const()
     }
 
     fn parse_statement(&mut self) -> miette::Result<()> {
@@ -558,9 +589,163 @@ impl<'de> Parser<'de> {
                 self.parse_block()?;
                 self.end_scope();
             }
+            TokenKind::If => {
+                self.lexer.next();
+                self.parse_if_statement()?;
+            }
+            TokenKind::While => {
+                self.lexer.next();
+                self.parse_while_statement()?;
+            }
+            TokenKind::For => {
+                self.lexer.next();
+                self.parse_for_statement()?;
+            }
             _ => self.parse_expr_statement()?,
         };
         Ok(())
+    }
+
+    fn parse_for_statement(&mut self) -> miette::Result<()> {
+        // Variables declared in a for loop initializer clause
+        // belong to the for loop's inner scope
+        self.scope.begin_scope();
+
+        self.lexer.expect(
+            TokenKind::LeftParen,
+            "Expected opening paren '(' after for keyword",
+        )?;
+
+        let token = self
+            .lexer
+            .peek()
+            .expect("Expected expression after '('")
+            .as_ref()
+            .unwrap();
+
+        match token.kind {
+            TokenKind::Semicolon => {
+                let _ = self.lexer.next().unwrap();
+            }
+            // Parse initializer expression
+            TokenKind::Var => self.parse_var_decl()?,
+            _ => self.parse_expr_statement()?,
+        };
+
+        // Main loop body is right after initializer expression
+        let mut loop_start = self.chunk.last_op();
+        // loop start if off by one, correct value is loop_start + 1
+
+        let mut break_jump: Option<u16> = None;
+
+        let token = self.lexer.peek().unwrap().as_ref().unwrap();
+        match token.kind {
+            TokenKind::Semicolon => {
+                let _ = self.lexer.next();
+            }
+            // Condition clause exists
+            _ => {
+                self.parse_expr()?;
+                let _ = self
+                    .lexer
+                    .expect(TokenKind::Semicolon, "Expected ';' after expression")?;
+                // We only exit the loop from the condition clause
+                break_jump = Some(self.chunk.push_jump(OpCode::OpJumpIfFalse));
+                self.chunk.push_opcode(OpCode::OpPop);
+            }
+        };
+
+        let token = self.lexer.peek().unwrap().as_ref().unwrap();
+        match token.kind {
+            TokenKind::RightParen => {
+                let _ = self.lexer.next();
+            }
+            _ => {
+                // Increment clause exists
+                let body_jump = self.chunk.push_jump(OpCode::OpJump);
+                let increment_start = self.chunk.last_op();
+                self.parse_expr()?;
+                self.chunk.push_opcode(OpCode::OpPop);
+
+                self.lexer.expect(
+                    TokenKind::RightParen,
+                    "Expected closing paren ')' after for expression",
+                )?;
+
+                self.chunk.push_loop(loop_start);
+                loop_start = increment_start;
+                self.patch_jump(body_jump);
+            }
+        };
+
+        self.parse_statement()?;
+        self.chunk.push_loop(loop_start);
+
+        match break_jump {
+            Some(jump) => {
+                self.patch_jump(jump);
+                self.chunk.push_opcode(OpCode::OpPop);
+            }
+            None => (),
+        };
+
+        self.scope.end_scope();
+        Ok(())
+    }
+
+    fn parse_while_statement(&mut self) -> miette::Result<()> {
+        let loop_start = self.chunk.last_op();
+        self.lexer
+            .expect(TokenKind::LeftParen, "Expected '(' after \"while\" keyword")?;
+        self.parse_expr()?;
+        self.lexer.expect(
+            TokenKind::RightParen,
+            "Expected closing '(' after condition",
+        )?;
+
+        let break_jump = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        self.chunk.push_opcode(OpCode::OpPop);
+
+        self.parse_statement()?;
+
+        self.chunk.push_loop(loop_start);
+        self.patch_jump(break_jump);
+        self.chunk.push_opcode(OpCode::OpPop);
+        Ok(())
+    }
+
+    fn parse_if_statement(&mut self) -> miette::Result<()> {
+        self.lexer
+            .expect(TokenKind::LeftParen, "Expected '(' after \"if\" keyword")?;
+        self.parse_expr()?;
+        self.lexer
+            .expect(TokenKind::RightParen, "Expected '(' after condition")?;
+
+        let else_offset = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        self.chunk.push_opcode(OpCode::OpPop);
+        self.parse_statement()?;
+
+        let if_offset = self.chunk.push_jump(OpCode::OpJump);
+
+        self.patch_jump(else_offset);
+        self.chunk.push_opcode(OpCode::OpPop);
+
+        if let Some(Ok(token)) = self.lexer.peek() {
+            match token.kind {
+                TokenKind::Else => {
+                    self.lexer.next();
+                    self.parse_statement()?;
+                }
+                _ => (),
+            };
+        }
+        self.patch_jump(if_offset);
+        Ok(())
+    }
+
+    fn patch_jump(&mut self, offset: u16) {
+        let jump = self.chunk.last_op() - offset;
+        self.chunk.patch_jump(offset, jump);
     }
 
     fn parse_block(&mut self) -> miette::Result<()> {
@@ -640,7 +825,7 @@ impl<'de> Parser<'de> {
             infix_rule(self, token, can_assign)?;
         }
 
-        if can_assign && self.lexer.peek().unwrap().as_ref().unwrap().kind == TokenKind::Eq {
+        if !can_assign && self.lexer.peek().unwrap().as_ref().unwrap().kind == TokenKind::Eq {
             return Err(miette::miette!("Invalid assignment target."));
         }
 
@@ -653,6 +838,29 @@ impl<'de> Parser<'de> {
         self.lexer
             .expect(TokenKind::RightParen, "expected closing parentheses")?;
 
+        Ok(())
+    }
+
+    fn parse_and(&mut self, _: Token, _: bool) -> miette::Result<()> {
+        let jump = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+
+        self.chunk.push_opcode(OpCode::OpPop);
+        self.parse_prec(Precedence::And)?;
+        self.patch_jump(jump);
+        Ok(())
+    }
+
+    fn parse_or(&mut self, _: Token, _: bool) -> miette::Result<()> {
+        // If the first condition is false, evaluate the second
+        let second_cond = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        // If the first condition is true, jump to the end
+        let first_cond = self.chunk.push_jump(OpCode::OpJump);
+
+        self.patch_jump(second_cond);
+        self.chunk.push_opcode(OpCode::OpPop);
+        self.parse_prec(Precedence::Or)?;
+
+        self.patch_jump(first_cond);
         Ok(())
     }
 
@@ -926,6 +1134,64 @@ mod tests {
         let mut chunk = Chunk::new();
         let mut parser = Parser::new(&source, &mut chunk);
         let _ = parser.compile().unwrap();
+        assert_eq!(expected, chunk);
+    }
+
+    #[test]
+    fn global_inside_scope() {
+        let source = "var eita = 1; {print eita;}";
+        let mut expected = Chunk::new();
+        expected.push_const(Value::String("eita".to_string()));
+        expected.push_opconst(Value::Number(1.));
+        expected.push_defvar(0, OpCode::OpDefGlobal);
+        // We have to add "eita" again since everytime a variable
+        // is encountered we add it to the constants table
+        expected.push_const(Value::String("eita".to_string()));
+        expected.push_getvar(2, OpCode::OpGetGlobal);
+        expected.push_opcode(OpCode::OpPrint);
+        expected.push_opcode(OpCode::OpReturn);
+
+        let mut chunk = Chunk::new();
+        let mut parser = Parser::new(&source, &mut chunk);
+        let _ = parser.compile().unwrap();
+        assert_eq!(expected, chunk);
+    }
+
+    #[test]
+    fn scoped_var() {
+        let source = "{var eita = 1; print eita;}";
+        let mut expected = Chunk::new();
+        expected.push_opconst(Value::Number(1.));
+        expected.push_getvar(0, OpCode::OpGetLocal);
+        expected.push_opcode(OpCode::OpPrint);
+        expected.push_opcode(OpCode::OpPop);
+        expected.push_opcode(OpCode::OpReturn);
+
+        let mut chunk = Chunk::new();
+        let mut parser = Parser::new(&source, &mut chunk);
+        let _ = parser.compile().unwrap();
+
+        assert_eq!(expected, chunk);
+    }
+
+    #[test]
+    fn nested_scope_var() {
+        let source = "{var eita = 1; {var eita = \"value\"; print eita;} print eita;}";
+        let mut expected = Chunk::new();
+        expected.push_opconst(Value::Number(1.));
+        expected.push_opconst(Value::String("value".to_string()));
+        expected.push_getvar(1, OpCode::OpGetLocal);
+        expected.push_opcode(OpCode::OpPrint);
+        expected.push_opcode(OpCode::OpPop);
+        expected.push_getvar(0, OpCode::OpGetLocal);
+        expected.push_opcode(OpCode::OpPrint);
+        expected.push_opcode(OpCode::OpPop);
+        expected.push_opcode(OpCode::OpReturn);
+
+        let mut chunk = Chunk::new();
+        let mut parser = Parser::new(&source, &mut chunk);
+        let _ = parser.compile().unwrap();
+
         assert_eq!(expected, chunk);
     }
 }

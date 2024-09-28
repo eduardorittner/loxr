@@ -16,6 +16,8 @@ struct Args {
 enum Commands {
     Tokenize { filename: PathBuf },
     Interpret { filename: PathBuf },
+    Debug { filename: PathBuf },
+    DebugChunk { filename: PathBuf },
     Chunk,
     Repl { debug: Option<bool> },
 }
@@ -23,6 +25,17 @@ enum Commands {
 fn main() -> miette::Result<()> {
     let args = Args::parse();
     match args.command {
+        Commands::DebugChunk { filename } => {
+            let file_contents = fs::read_to_string(&filename)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("reading '{}' failed", filename.display()))?;
+
+            let mut vm = Vm::new();
+            vm.compile(&file_contents)?;
+
+            println!("{}", vm.code);
+            Ok(())
+        }
         Commands::Interpret { filename } => {
             let file_contents = fs::read_to_string(&filename)
                 .into_diagnostic()
@@ -30,6 +43,18 @@ fn main() -> miette::Result<()> {
 
             let mut vm = Vm::new();
             vm.compile(&file_contents)?;
+            vm.run()?;
+            Ok(())
+        }
+
+        Commands::Debug { filename } => {
+            let file_contents = fs::read_to_string(&filename)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("reading '{}' failed", filename.display()))?;
+
+            let mut vm = Vm::new().with_debug();
+            vm.compile(&file_contents)?;
+            println!("{}", vm.code);
             vm.run()?;
             Ok(())
         }

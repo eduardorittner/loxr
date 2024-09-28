@@ -1,31 +1,56 @@
 use crate::chunk::Chunk;
 use crate::{OpCode, Parser, Value};
 use miette::{IntoDiagnostic, WrapErr};
+use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::fmt::Write;
+use std::io;
+use std::io::Cursor;
+use std::io::{Stdout, Write};
+use std::str::SplitAsciiWhitespace;
 
-pub struct Vm {
+pub struct Vm<W: io::Write> {
     pub code: Chunk,
-    pc: u8,
+    pc: u16,
     debug: bool,
     stack: Vec<Value>,
     globals: HashMap<String, Value>,
+    out: W,
 }
 
-impl Default for Vm {
-    fn default() -> Self {
-        Vm::new()
-    }
-}
-
-impl Vm {
-    pub fn new() -> Self {
+impl Vm<Cursor<Vec<u8>>> {
+    pub fn test() -> Self {
         Self {
             code: Chunk::new(),
             pc: 0,
             debug: false,
             stack: Vec::new(),
             globals: HashMap::new(),
+            out: Cursor::new(Vec::new()),
+        }
+    }
+
+    pub fn read_out(&mut self) -> String {
+        let v = self.out.get_ref().clone();
+        String::from_utf8(v).expect("All writes should be valid UTF-8")
+    }
+}
+
+impl Default for Vm<Stdout> {
+    fn default() -> Self {
+        Vm::new()
+    }
+}
+
+impl Vm<Stdout> {
+    pub fn new() -> Self {
+        let out = std::io::stdout();
+        Self {
+            code: Chunk::new(),
+            pc: 0,
+            debug: false,
+            stack: Vec::new(),
+            globals: HashMap::new(),
+            out,
         }
     }
 
@@ -36,9 +61,12 @@ impl Vm {
             debug: false,
             stack: Vec::new(),
             globals: HashMap::new(),
+            out: std::io::stdout(),
         }
     }
+}
 
+impl<T: Write> Vm<T> {
     pub fn with_debug(mut self) -> Self {
         self.debug = true;
         self
@@ -77,12 +105,18 @@ impl Vm {
         byte
     }
 
-    fn print_stack(&self) {
-        let mut s = String::new();
+    fn read_jump(&mut self) -> u16 {
+        let low = self.code.index_at(self.pc);
+        let high = self.code.index_at(self.pc + 1);
+        self.pc += 2;
+        (high as u16) << 8 | low as u16
+    }
+
+    fn print_stack(&mut self) {
         for value in &self.stack {
-            let _ = write!(&mut s, "[ {} ]", value);
+            let _ = self.out.write_fmt(format_args!("[ {} ]", value));
         }
-        println!("{s}");
+        let _ = self.out.write(b"\n");
     }
 
     pub fn compile(&mut self, file_contents: &str) -> miette::Result<()> {
@@ -94,7 +128,11 @@ impl Vm {
     pub fn run_once(&mut self) -> miette::Result<bool> {
         if self.debug {
             self.print_stack();
-            println!("{:04} {}", self.pc, self.code.code_at(self.pc));
+            let _ = self.out.write_fmt(format_args!(
+                "{:04} {}\n",
+                self.pc,
+                self.code.code_at(self.pc)
+            ));
         }
         match self.read_byte() {
             OpCode::OpReturn => return Ok(true),
@@ -182,7 +220,7 @@ impl Vm {
             }
             OpCode::OpPrint => {
                 let a = self.stack.pop().expect("Stack empty");
-                println!("{a}");
+                let _ = self.out.write_fmt(format_args!("{a}\n"));
             }
             OpCode::OpPop => {
                 let _ = self.stack.pop();
@@ -209,6 +247,21 @@ impl Vm {
                 let index = self.read_index();
                 self.stack
                     .push(self.stack.get(index as usize).unwrap().clone());
+            }
+            OpCode::OpJumpIfFalse => {
+                let jump = self.read_jump();
+                let cond = self.stack.last().unwrap();
+                if cond.is_falsey() {
+                    self.pc += jump;
+                }
+            }
+            OpCode::OpJump => {
+                let jump = self.read_jump();
+                self.pc += jump - 1;
+            }
+            OpCode::OpLoop => {
+                let jump = self.read_jump();
+                self.pc -= jump;
             }
         };
         Ok(false)
@@ -432,5 +485,37 @@ mod tests {
         let mut vm = Vm::with_chunk(code);
         let res = vm.run_exact(8).unwrap();
         assert_eq!(res, Value::String("hello, world!".to_string()));
+    }
+
+    #[test]
+    pub fn local_var() {
+        let mut code = Chunk::new();
+        code.push_opconst(Value::Number(10.));
+        code.push_getvar(0, OpCode::OpGetLocal);
+        code.push_opconst(Value::Number(2.));
+        code.push_opcode(OpCode::OpMultiply);
+        code.push_opcode(OpCode::OpReturn);
+        let mut vm = Vm::with_chunk(code);
+        let res = vm.run_exact(4).unwrap();
+        assert_eq!(res, Value::Number(20.));
+    }
+
+    #[test]
+    pub fn local_vars() {
+        let mut code = Chunk::new();
+        code.push_opconst(Value::Number(10.));
+        code.push_opconst(Value::Number(2.));
+        code.push_getvar(1, OpCode::OpGetLocal);
+        code.push_getvar(0, OpCode::OpGetLocal);
+        code.push_opcode(OpCode::OpDivide);
+
+        code.push_opconst(Value::Number(2.));
+        code.push_opconst(Value::Number(10.));
+        code.push_opcode(OpCode::OpDivide);
+        code.push_opcode(OpCode::OpEq);
+        code.push_opcode(OpCode::OpReturn);
+        let mut vm = Vm::with_chunk(code);
+        let res = vm.run_exact(9).unwrap();
+        assert_eq!(res, Value::Bool(true));
     }
 }

@@ -1,12 +1,9 @@
 use crate::chunk::Chunk;
 use crate::{OpCode, Parser, Value};
-use miette::{IntoDiagnostic, WrapErr};
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::io;
 use std::io::Cursor;
 use std::io::{Stdout, Write};
-use std::str::SplitAsciiWhitespace;
 
 pub struct Vm<W: io::Write> {
     pub code: Chunk,

@@ -1,5 +1,4 @@
 use crate::Value;
-use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OpCode {
@@ -61,12 +60,12 @@ impl std::fmt::Display for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "{:<4} | {:<20} | {:<10} | {}",
-            "PC", "OP CODE", "OPERAND", "VALUE"
+            "{:<4} | {:<20} | {:<10} | VALUE",
+            "PC", "OP CODE", "OPERAND"
         )?;
 
         let mut code = self.code.clone().into_iter().enumerate();
-        while let Some((index, byte)) = code.next() {
+        for (index, byte) in code {
             let _ = write!(f, "{:04} | ", index);
             let _ = match byte {
                 // For some reason the width {:20} format parameter doesn't work with OpCode's
@@ -229,7 +228,7 @@ impl Chunk {
     pub fn jump(&mut self, jump: i32) {
         if jump < 0 {
             // Jump from the last executed instruction
-            self.pc -= 1 + jump.abs() as usize;
+            self.pc -= 1 + jump.unsigned_abs() as usize;
         } else {
             self.pc += jump as usize;
         }

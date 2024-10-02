@@ -1,5 +1,5 @@
 use crate::{lex::Token, lex::TokenKind, Chunk, Lexer, OpCode, Value};
-use miette::{LabeledSpan, WrapErr};
+use miette::LabeledSpan;
 use std::collections::HashMap;
 
 type ParseFn<'de> = fn(&mut Parser<'de>, Token<'de>, bool) -> miette::Result<()>;
@@ -487,10 +487,7 @@ impl<'de> Parser<'de> {
     }
 
     fn define_var(&mut self, index: Option<u32>) {
-        match index {
-            Some(index) => self.chunk.push_defvar(OpCode::OpDefGlobal(index)),
-            None => (),
-        }
+        if let Some(index) = index { self.chunk.push_defvar(OpCode::OpDefGlobal(index)) }
     }
 
     fn resolve_local_var(&mut self, token: Token) -> miette::Result<Option<u32>> {
@@ -505,9 +502,9 @@ impl<'de> Parser<'de> {
             Some(index) => {
                 let index = self.scope.locals.len() - 1 - index;
                 if !self.scope.locals.get(index).unwrap().defined {
-                    return Err(miette::miette!(
+                    Err(miette::miette!(
                         "Can't read local variable in its own initializer"
-                    ));
+                    ))
                 } else {
                     Ok(Some(index as u32))
                 }
@@ -554,7 +551,7 @@ impl<'de> Parser<'de> {
             ));
         }
 
-        self.scope.add_local(&token.source);
+        self.scope.add_local(token.source);
         Ok(())
     }
 
@@ -677,12 +674,9 @@ impl<'de> Parser<'de> {
         self.parse_statement()?;
         self.chunk.push_loop(loop_start);
 
-        match break_jump {
-            Some(jump) => {
-                self.patch_jump(jump);
-                self.chunk.push_opcode(OpCode::OpPop);
-            }
-            None => (),
+        if let Some(jump) = break_jump {
+            self.patch_jump(jump);
+            self.chunk.push_opcode(OpCode::OpPop);
         };
 
         self.scope.end_scope();
@@ -727,12 +721,9 @@ impl<'de> Parser<'de> {
         self.chunk.push_opcode(OpCode::OpPop);
 
         if let Some(Ok(token)) = self.lexer.peek() {
-            match token.kind {
-                TokenKind::Else => {
-                    self.lexer.next();
-                    self.parse_statement()?;
-                }
-                _ => (),
+            if let TokenKind::Else = token.kind {
+                self.lexer.next();
+                self.parse_statement()?;
             };
         }
         self.patch_jump(if_offset);

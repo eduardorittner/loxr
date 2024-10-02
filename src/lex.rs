@@ -283,7 +283,7 @@ impl<'de> Iterator for Lexer<'de> {
         };
             break match started {
                 Started::TString => {
-                    let Some(end_of_str) = c_onwards[1..].find(|c| matches!(c, '"')) else {
+                    let Some(end_of_str) = c_onwards[1..].find('"') else {
                         return Some(Err(miette::miette! {
                             labels = vec![LabeledSpan::at(self.offset - c.len_utf8()..self.offset, "this string")],
                             "Unterminated string",

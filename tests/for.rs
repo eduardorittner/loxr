@@ -6,6 +6,7 @@ fn endless_for() {
     let mut vm = Vm::test();
     let source_code = "for(;;) { print 1; }";
     vm.compile(&source_code).unwrap();
+    println!("{}", vm.code);
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();

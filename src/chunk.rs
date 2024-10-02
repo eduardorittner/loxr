@@ -1,11 +1,9 @@
 use crate::Value;
 use std::fmt;
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OpCode {
     OpReturn,
-    OpConstant,
     OpNegate,
     OpNot,
     OpAdd,
@@ -20,57 +18,20 @@ pub enum OpCode {
     OpFalse,
     OpPrint,
     OpPop,
-    OpDefGlobal,
-    OpGetGlobal,
-    OpDefLocal,
-    OpGetLocal,
-    OpJumpIfFalse,
-    OpJump,
-    OpLoop, // A backwards jump
-}
 
-#[derive(Clone, Copy)]
-pub union ByteCode {
-    code: OpCode,
-    index: u8,
-}
-
-impl std::cmp::PartialEq for ByteCode {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_index() == other.as_index()
-    }
-}
-
-impl fmt::Debug for ByteCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_index())
-    }
-}
-
-impl ByteCode {
-    fn as_op(&self) -> OpCode {
-        unsafe { self.code }
-    }
-
-    fn as_index(&self) -> u8 {
-        unsafe { self.index }
-    }
-
-    fn constant(&self, constants: &[Value]) -> Value {
-        // This is safe since we only store indices of values that
-        // exist, and never mutate any indices
-        unsafe {
-            let index = self.index;
-            constants.get_unchecked(index as usize).clone()
-        }
-    }
+    OpConstant(u32),
+    OpDefGlobal(u32),
+    OpGetGlobal(u32),
+    OpDefLocal(u32),
+    OpGetLocal(u32),
+    OpJumpIfFalse(i32),
+    OpJump(i32),
 }
 
 impl std::fmt::Display for OpCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpCode::OpReturn => write!(f, "OP_RETURN"),
-            OpCode::OpConstant => write!(f, "OP_CONSTANT"),
             OpCode::OpNegate => write!(f, "OP_NEGATE"),
             OpCode::OpNot => write!(f, "OP_NOT"),
             OpCode::OpAdd => write!(f, "OP_ADD"),
@@ -85,110 +46,116 @@ impl std::fmt::Display for OpCode {
             OpCode::OpLess => write!(f, "OP_LESS"),
             OpCode::OpPrint => write!(f, "OP_PRINT"),
             OpCode::OpPop => write!(f, "OP_POP"),
-            OpCode::OpDefGlobal => write!(f, "OP_DEF_GLOBAL"),
-            OpCode::OpGetGlobal => write!(f, "OP_GET_GLOBAL"),
-            OpCode::OpDefLocal => write!(f, "OP_DEF_LOCAL"),
-            OpCode::OpGetLocal => write!(f, "OP_GET_LOCAL"),
-            OpCode::OpJumpIfFalse => write!(f, "OP_JUMP_IF_FALSE"),
-            OpCode::OpJump => write!(f, "OP_JUMP"),
-            OpCode::OpLoop => write!(f, "OP_LOOP"),
+            OpCode::OpConstant(_) => write!(f, "OP_CONSTANT"),
+            OpCode::OpDefGlobal(_) => write!(f, "OP_DEF_GLOBAL"),
+            OpCode::OpGetGlobal(_) => write!(f, "OP_GET_GLOBAL"),
+            OpCode::OpDefLocal(_) => write!(f, "OP_DEF_LOCAL"),
+            OpCode::OpGetLocal(_) => write!(f, "OP_GET_LOCAL"),
+            OpCode::OpJumpIfFalse(_) => write!(f, "OP_JUMP_IF_FALSE"),
+            OpCode::OpJump(_) => write!(f, "OP_JUMP"),
         }
     }
 }
 
 impl std::fmt::Display for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, " PC  | OP CODE             | OP   | VALUE",)?;
-        // Utility closure to print an instruction and its operand
-        let op_and_index =
-            |f: &mut fmt::Formatter<'_>, op: OpCode, constant: ByteCode, values| -> fmt::Result {
-                let op_string = String::from(op.to_string());
-                let len = op_string.len();
-                if len >= 20 {
-                    panic!("op code name too long, please refactor this code");
-                }
-                write!(
-                    f,
-                    "{}{}| {:04} | '{}'",
-                    op,
-                    " ".repeat(20 - len),
-                    constant.as_index(),
-                    constant.constant(values)
-                )
-            };
-
-        let jump =
-            |f: &mut fmt::Formatter<'_>, op: OpCode, c1: ByteCode, c2: ByteCode| -> fmt::Result {
-                let op_string = String::from(op.to_string());
-                let len = op_string.len();
-                if len >= 20 {
-                    panic!("op code name too long, please refactor this code");
-                }
-                write!(
-                    f,
-                    "{}{}| {:08}",
-                    op,
-                    " ".repeat(20 - len),
-                    (c1.as_index() as u16 | (c2.as_index() as u16) << 8),
-                )
-            };
+        writeln!(
+            f,
+            "{:<4} | {:<20} | {:<10} | {}",
+            "PC", "OP CODE", "OPERAND", "VALUE"
+        )?;
 
         let mut code = self.code.clone().into_iter().enumerate();
         while let Some((index, byte)) = code.next() {
             let _ = write!(f, "{:04} | ", index);
-            let _ = match byte.as_op() {
-                OpCode::OpReturn => write!(f, "{}", OpCode::OpReturn),
-                OpCode::OpConstant => {
-                    let (_, constant) = code.next().expect("No index following an OP_CONSTANT");
-                    op_and_index(f, OpCode::OpConstant, constant, &self.values)
+            let _ = match byte {
+                // For some reason the width {:20} format parameter doesn't work with OpCode's
+                // Display trait, so we first convert it to a string and then pad that string
+                OpCode::OpReturn => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpReturn), "")
                 }
-                OpCode::OpNegate => write!(f, "{}", OpCode::OpNegate),
-                OpCode::OpNot => write!(f, "{}", OpCode::OpNot),
-                OpCode::OpAdd => write!(f, "{}", OpCode::OpAdd),
-                OpCode::OpSubtract => write!(f, "{}", OpCode::OpSubtract),
-                OpCode::OpMultiply => write!(f, "{}", OpCode::OpMultiply),
-                OpCode::OpDivide => write!(f, "{}", OpCode::OpDivide),
-                OpCode::OpNil => write!(f, "{}", OpCode::OpNil),
-                OpCode::OpTrue => write!(f, "{}", OpCode::OpTrue),
-                OpCode::OpFalse => write!(f, "{}", OpCode::OpFalse),
-                OpCode::OpEq => write!(f, "{}", OpCode::OpEq),
-                OpCode::OpGreater => write!(f, "{}", OpCode::OpGreater),
-                OpCode::OpLess => write!(f, "{}", OpCode::OpLess),
-                OpCode::OpPrint => write!(f, "{}", OpCode::OpPrint),
-                OpCode::OpPop => write!(f, "{}", OpCode::OpPop),
-                OpCode::OpDefGlobal => {
-                    let (_, constant) = code.next().expect("No index following an OP_DEF_GLOBAL");
-                    op_and_index(f, OpCode::OpDefGlobal, constant, &self.values)
+                OpCode::OpNegate => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpNegate), "")
                 }
-                OpCode::OpGetGlobal => {
-                    let (_, constant) = code.next().expect("No index following an OP_GET_GLOBAL");
-                    op_and_index(f, OpCode::OpGetGlobal, constant, &self.values)
+                OpCode::OpNot => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpNot), ""),
+                OpCode::OpAdd => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpAdd), ""),
+                OpCode::OpSubtract => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpSubtract), "")
                 }
-                OpCode::OpDefLocal => {
-                    let (_, constant) = code.next().expect("No index following an OP_DEF_LOCAL");
-                    op_and_index(f, OpCode::OpDefLocal, constant, &self.values)
+                OpCode::OpMultiply => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpMultiply), "")
                 }
-                OpCode::OpGetLocal => {
-                    let (_, constant) = code.next().expect("No index following an OP_GET_LOCAL");
-                    op_and_index(f, OpCode::OpGetLocal, constant, &self.values)
+                OpCode::OpDivide => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpDivide), "")
                 }
-                OpCode::OpJumpIfFalse => {
-                    let (_, c1) = code.next().expect("No jump offset after JUMP_IF_FALSE");
-                    let (_, c2) = code.next().expect("No jump offset after JUMP_IF_FALSE");
-                    jump(f, OpCode::OpJumpIfFalse, c1, c2)
+                OpCode::OpNil => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpNil), ""),
+                OpCode::OpTrue => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpTrue), "")
                 }
-                OpCode::OpJump => {
-                    let (_, c1) = code.next().expect("No jump offset after JUMP");
-                    let (_, c2) = code.next().expect("No jump offset after JUMP");
-                    jump(f, OpCode::OpJump, c1, c2)
+                OpCode::OpFalse => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpFalse), "")
                 }
-                OpCode::OpLoop => {
-                    let (_, c1) = code.next().expect("No jump offset after JUMP");
-                    let (_, c2) = code.next().expect("No jump offset after JUMP");
-                    jump(f, OpCode::OpLoop, c1, c2)
+                OpCode::OpEq => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpEq), ""),
+                OpCode::OpGreater => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpGreater), "")
                 }
+                OpCode::OpLess => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpLess), "")
+                }
+                OpCode::OpPrint => {
+                    writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpPrint), "")
+                }
+                OpCode::OpPop => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpPop), ""),
+                OpCode::OpConstant(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} | {}",
+                    format!("{}", OpCode::OpConstant(i)),
+                    format!("{}", i),
+                    format!("{}", self.values[i as usize])
+                ),
+                OpCode::OpDefGlobal(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} | {}",
+                    format!("{}", OpCode::OpDefGlobal(i)),
+                    format!("{}", i),
+                    format!("{}", self.values[i as usize])
+                ),
+                OpCode::OpGetGlobal(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} | {}",
+                    format!("{}", OpCode::OpGetGlobal(i)),
+                    format!("{}", i),
+                    format!("{}", self.values[i as usize])
+                ),
+                OpCode::OpDefLocal(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} | {}",
+                    format!("{}", OpCode::OpDefLocal(i)),
+                    format!("{}", i),
+                    format!("{}", self.values[i as usize])
+                ),
+                OpCode::OpGetLocal(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} | {}",
+                    format!("{}", OpCode::OpGetLocal(i)),
+                    format!("{}", i),
+                    format!("{}", self.values[i as usize])
+                ),
+                OpCode::OpJumpIfFalse(i) => {
+                    writeln!(
+                        f,
+                        "{:20} | {:<10} |",
+                        format!("{}", OpCode::OpJumpIfFalse(i)),
+                        format!("{}", i)
+                    )
+                }
+                OpCode::OpJump(i) => writeln!(
+                    f,
+                    "{:<20} | {:<10} |",
+                    format!("{}", OpCode::OpJump(i)),
+                    format!("{}", i)
+                ),
             };
-            let _ = writeln!(f);
         }
         Ok(())
     }
@@ -196,8 +163,9 @@ impl std::fmt::Display for Chunk {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Chunk {
-    code: Vec<ByteCode>,
+    code: Vec<OpCode>,
     values: Vec<Value>,
+    pc: usize,
 }
 
 impl Default for Chunk {
@@ -211,104 +179,123 @@ impl Chunk {
         Self {
             code: Vec::with_capacity(64),
             values: Vec::with_capacity(16),
+            pc: 0,
         }
     }
 
     pub fn push_opcode(&mut self, c: OpCode) {
-        self.code.push(ByteCode { code: c });
+        self.code.push(c);
     }
 
     pub fn push_opcodes(&mut self, c1: OpCode, c2: OpCode) {
-        self.code.push(ByteCode { code: c1 });
-        self.code.push(ByteCode { code: c2 });
+        self.code.push(c1);
+        self.code.push(c2);
     }
 
-    pub fn patch_jump(&mut self, offset: u16, jump: u16) {
-        *self.code.get_mut((offset - 1) as usize).unwrap() = ByteCode { index: jump as u8 };
-        *self.code.get_mut(offset as usize).unwrap() = ByteCode {
-            index: (jump >> 8) as u8,
-        };
+    pub fn patch_jump(&mut self, from: usize, to: usize) {
+        assert!(
+            to > from,
+            "patch_jump must only be called for forward jumps!"
+        );
+        if let Some(op) = self.code.get_mut(from) {
+            *op = match op {
+                OpCode::OpJump(_) => OpCode::OpJump((to - from) as i32),
+                OpCode::OpJumpIfFalse(_) => OpCode::OpJumpIfFalse((to - from) as i32),
+                _ => panic!("You lied to me! This instruction should be a Jump op"),
+            }
+        } else {
+            panic!("Please implement some proper error handling...");
+        }
+    }
+
+    pub fn push_value(&mut self, global: Value) -> u32 {
+        self.values.push(global);
+        (self.values.len() - 1) as u32
     }
 
     pub fn push_const(&mut self, c: Value) {
+        let i = self.values.len();
         self.values.push(c);
-        // TODO: Add OP_CONSTANT_LONG that is followed by
-        // 3 bytes to represent the index, so the max size
-        // of self.values would be ~16 million
-        if self.values.len() > 256 {
-            panic!("Overflow in vec of constants!")
+        self.code.push(OpCode::OpConstant(i as u32));
+    }
+
+    // Pushes a jump and returns its index
+    pub fn push_jump(&mut self, c: OpCode) -> usize {
+        assert!(matches!(c, OpCode::OpJump(_) | OpCode::OpJumpIfFalse(_)));
+        self.push_opcode(c);
+        self.code.len() - 1
+    }
+
+    pub fn jump(&mut self, jump: i32) {
+        if jump < 0 {
+            // Jump from the last executed instruction
+            self.pc -= 1 + jump.abs() as usize;
+        } else {
+            self.pc += jump as usize;
         }
     }
 
-    pub fn push_opconst(&mut self, c: Value) {
-        self.code.push(ByteCode {
-            code: OpCode::OpConstant,
-        });
-        self.code.push(ByteCode {
-            index: self.values.len() as u8,
-        });
-        self.push_const(c);
+    pub fn get_const(&self, i: u32) -> Option<Value> {
+        self.values.get(i as usize).cloned()
     }
 
     // Maybe return an Option?
-    pub fn last_const(&self) -> u8 {
-        (self.values.len() - 1) as u8
+    pub fn last_const(&self) -> u32 {
+        (self.values.len() - 1) as u32
     }
 
-    pub fn last_op(&self) -> u16 {
-        self.code.len() as u16
+    pub fn last_op(&self) -> usize {
+        self.code.len().saturating_sub(1)
     }
 
-    pub fn push_defvar(&mut self, index: u8, code: OpCode) {
+    pub fn next_op(&self) -> usize {
+        self.code.len()
+    }
+
+    pub fn push_defvar(&mut self, code: OpCode) {
         match code {
-            OpCode::OpDefGlobal => self.push_opcode(OpCode::OpDefGlobal),
-            OpCode::OpDefLocal => self.push_opcode(OpCode::OpDefLocal),
+            OpCode::OpDefGlobal(index) => self.push_opcode(OpCode::OpDefGlobal(index)),
+            OpCode::OpDefLocal(index) => self.push_opcode(OpCode::OpDefLocal(index)),
             _ => unreachable!(),
         }
-        self.code.push(ByteCode { index });
     }
 
-    pub fn push_getvar(&mut self, index: u8, code: OpCode) {
+    pub fn push_getvar(&mut self, code: OpCode) {
         match code {
-            OpCode::OpGetGlobal => self.push_opcode(OpCode::OpGetGlobal),
-            OpCode::OpGetLocal => self.push_opcode(OpCode::OpGetLocal),
+            OpCode::OpGetGlobal(index) => self.push_opcode(OpCode::OpGetGlobal(index)),
+            OpCode::OpGetLocal(index) => self.push_opcode(OpCode::OpGetLocal(index)),
             _ => unreachable!(),
         }
-        self.code.push(ByteCode { index });
     }
 
-    pub fn push_jump(&mut self, code: OpCode) -> u16 {
-        self.push_opcode(code);
-        self.code.push(ByteCode { index: 0 });
-        self.code.push(ByteCode { index: 0 });
-        return self.code.len() as u16 - 1;
-    }
-
-    pub fn push_loop(&mut self, loop_index: u16) {
-        self.push_opcode(OpCode::OpLoop);
-
-        let offset = self.last_op() + 2 - loop_index;
-        self.code.push(ByteCode {
-            index: offset as u8,
-        });
-        self.code.push(ByteCode {
-            index: (offset >> 8) as u8,
-        });
+    pub fn push_loop(&mut self, loop_index: usize) {
+        let index = self.last_op() + 1;
+        assert!(
+            index > loop_index,
+            "Loop index must be smaller than index! Dummy"
+        );
+        let offset = (index - loop_index) as i32;
+        self.push_opcode(OpCode::OpJump(-offset));
     }
 
     pub fn push_return(&mut self) {
         self.push_opcode(OpCode::OpReturn);
     }
 
-    pub fn code_at(&self, i: u16) -> OpCode {
-        unsafe { self.code.get_unchecked(i as usize).as_op() }
+    pub fn pc(&self) -> usize {
+        self.pc
     }
 
-    pub fn index_at(&self, i: u16) -> u8 {
-        unsafe { self.code.get_unchecked(i as usize).as_index() }
+    pub fn current_op(&self) -> OpCode {
+        self.code[self.pc]
     }
+}
 
-    pub fn const_at(&self, i: u16) -> Value {
-        unsafe { self.code.get_unchecked(i as usize).constant(&self.values) }
+impl Iterator for Chunk {
+    type Item = OpCode;
+    fn next(&mut self) -> Option<Self::Item> {
+        let op = self.code.get(self.pc).cloned();
+        self.pc += 1;
+        op
     }
 }

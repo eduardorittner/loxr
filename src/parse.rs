@@ -486,14 +486,14 @@ impl<'de> Parser<'de> {
         Ok(())
     }
 
-    fn define_var(&mut self, index: Option<u8>) {
+    fn define_var(&mut self, index: Option<u32>) {
         match index {
-            Some(index) => self.chunk.push_defvar(index, OpCode::OpDefGlobal),
+            Some(index) => self.chunk.push_defvar(OpCode::OpDefGlobal(index)),
             None => (),
         }
     }
 
-    fn resolve_local_var(&mut self, token: Token) -> miette::Result<Option<u8>> {
+    fn resolve_local_var(&mut self, token: Token) -> miette::Result<Option<u32>> {
         let index = self
             .scope
             .locals
@@ -509,7 +509,7 @@ impl<'de> Parser<'de> {
                         "Can't read local variable in its own initializer"
                     ));
                 } else {
-                    Ok(Some(index as u8))
+                    Ok(Some(index as u32))
                 }
             }
             None => Ok(None),
@@ -517,15 +517,11 @@ impl<'de> Parser<'de> {
     }
 
     fn parse_ident(&mut self, token: Token<'de>, can_assign: bool) -> miette::Result<()> {
-        let (index, set_op, get_op) = if let Some(index) = self.resolve_local_var(token)? {
-            (Some(index), OpCode::OpDefLocal, OpCode::OpGetLocal)
+        let (set_op, get_op) = if let Some(index) = self.resolve_local_var(token)? {
+            (OpCode::OpDefLocal(index), OpCode::OpGetLocal(index))
         } else {
-            (
-                // Find the variable with the following name
-                Some(self.global_variable(token, can_assign)),
-                OpCode::OpDefGlobal,
-                OpCode::OpGetGlobal,
-            )
+            let index = self.global_variable(token, can_assign);
+            (OpCode::OpDefGlobal(index), OpCode::OpGetGlobal(index))
         };
 
         let token = self.lexer.peek().unwrap().as_ref().unwrap();
@@ -535,11 +531,11 @@ impl<'de> Parser<'de> {
                 if can_assign {
                     self.lexer.next();
                     self.parse_expr()?;
-                    self.chunk.push_defvar(index.unwrap(), set_op)
+                    self.chunk.push_defvar(set_op)
                 };
             }
             _ => {
-                self.chunk.push_getvar(index.unwrap(), get_op);
+                self.chunk.push_getvar(get_op);
             }
         };
         Ok(())
@@ -562,7 +558,7 @@ impl<'de> Parser<'de> {
         Ok(())
     }
 
-    fn parse_variable(&mut self, token: Token<'de>, b: bool) -> miette::Result<Option<u8>> {
+    fn parse_variable(&mut self, token: Token<'de>, b: bool) -> miette::Result<Option<u32>> {
         self.declare_var(token)?;
         if self.scope.scope_depth > 0 {
             self.scope.init();
@@ -571,9 +567,8 @@ impl<'de> Parser<'de> {
         Ok(Some(self.global_variable(token, b)))
     }
 
-    fn global_variable(&mut self, token: Token<'de>, _: bool) -> u8 {
-        self.chunk.push_const(Value::String(token.to_string()));
-        self.chunk.last_const()
+    fn global_variable(&mut self, token: Token<'de>, _: bool) -> u32 {
+        self.chunk.push_value(Value::String(token.to_string()))
     }
 
     fn parse_statement(&mut self) -> miette::Result<()> {
@@ -634,9 +629,8 @@ impl<'de> Parser<'de> {
 
         // Main loop body is right after initializer expression
         let mut loop_start = self.chunk.last_op();
-        // loop start if off by one, correct value is loop_start + 1
 
-        let mut break_jump: Option<u16> = None;
+        let mut break_jump: Option<usize> = None;
 
         let token = self.lexer.peek().unwrap().as_ref().unwrap();
         match token.kind {
@@ -650,7 +644,7 @@ impl<'de> Parser<'de> {
                     .lexer
                     .expect(TokenKind::Semicolon, "Expected ';' after expression")?;
                 // We only exit the loop from the condition clause
-                break_jump = Some(self.chunk.push_jump(OpCode::OpJumpIfFalse));
+                break_jump = Some(self.chunk.push_jump(OpCode::OpJumpIfFalse(0)));
                 self.chunk.push_opcode(OpCode::OpPop);
             }
         };
@@ -660,10 +654,11 @@ impl<'de> Parser<'de> {
             TokenKind::RightParen => {
                 let _ = self.lexer.next();
             }
+            // Increment clause exists
             _ => {
-                // Increment clause exists
-                let body_jump = self.chunk.push_jump(OpCode::OpJump);
-                let increment_start = self.chunk.last_op();
+                // In the first iteration we don't evaluate the increment clause and just skip it
+                let body_jump = self.chunk.push_jump(OpCode::OpJump(0));
+                let increment_start = self.chunk.next_op();
                 self.parse_expr()?;
                 self.chunk.push_opcode(OpCode::OpPop);
 
@@ -672,6 +667,7 @@ impl<'de> Parser<'de> {
                     "Expected closing paren ')' after for expression",
                 )?;
 
+                // Jump to condition clause
                 self.chunk.push_loop(loop_start);
                 loop_start = increment_start;
                 self.patch_jump(body_jump);
@@ -694,7 +690,7 @@ impl<'de> Parser<'de> {
     }
 
     fn parse_while_statement(&mut self) -> miette::Result<()> {
-        let loop_start = self.chunk.last_op();
+        let loop_start = self.chunk.next_op();
         self.lexer
             .expect(TokenKind::LeftParen, "Expected '(' after \"while\" keyword")?;
         self.parse_expr()?;
@@ -703,7 +699,7 @@ impl<'de> Parser<'de> {
             "Expected closing '(' after condition",
         )?;
 
-        let break_jump = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        let break_jump = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
         self.chunk.push_opcode(OpCode::OpPop);
 
         self.parse_statement()?;
@@ -721,11 +717,11 @@ impl<'de> Parser<'de> {
         self.lexer
             .expect(TokenKind::RightParen, "Expected '(' after condition")?;
 
-        let else_offset = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        let else_offset = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
         self.chunk.push_opcode(OpCode::OpPop);
         self.parse_statement()?;
 
-        let if_offset = self.chunk.push_jump(OpCode::OpJump);
+        let if_offset = self.chunk.push_jump(OpCode::OpJump(0));
 
         self.patch_jump(else_offset);
         self.chunk.push_opcode(OpCode::OpPop);
@@ -743,9 +739,8 @@ impl<'de> Parser<'de> {
         Ok(())
     }
 
-    fn patch_jump(&mut self, offset: u16) {
-        let jump = self.chunk.last_op() - offset;
-        self.chunk.patch_jump(offset, jump);
+    fn patch_jump(&mut self, from: usize) {
+        self.chunk.patch_jump(from, self.chunk.last_op());
     }
 
     fn parse_block(&mut self) -> miette::Result<()> {
@@ -842,7 +837,7 @@ impl<'de> Parser<'de> {
     }
 
     fn parse_and(&mut self, _: Token, _: bool) -> miette::Result<()> {
-        let jump = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        let jump = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
 
         self.chunk.push_opcode(OpCode::OpPop);
         self.parse_prec(Precedence::And)?;
@@ -852,9 +847,9 @@ impl<'de> Parser<'de> {
 
     fn parse_or(&mut self, _: Token, _: bool) -> miette::Result<()> {
         // If the first condition is false, evaluate the second
-        let second_cond = self.chunk.push_jump(OpCode::OpJumpIfFalse);
+        let second_cond = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
         // If the first condition is true, jump to the end
-        let first_cond = self.chunk.push_jump(OpCode::OpJump);
+        let first_cond = self.chunk.push_jump(OpCode::OpJump(0));
 
         self.patch_jump(second_cond);
         self.chunk.push_opcode(OpCode::OpPop);
@@ -901,8 +896,8 @@ impl<'de> Parser<'de> {
             TokenKind::False => self.chunk.push_opcode(OpCode::OpFalse),
             TokenKind::True => self.chunk.push_opcode(OpCode::OpTrue),
             TokenKind::Nil => self.chunk.push_opcode(OpCode::OpNil),
-            TokenKind::Number(n) => self.chunk.push_opconst(Value::Number(n)),
-            TokenKind::TString => self.chunk.push_opconst(Value::String(token.to_string())),
+            TokenKind::Number(n) => self.chunk.push_const(Value::Number(n)),
+            TokenKind::TString => self.chunk.push_const(Value::String(token.to_string())),
             _ => unreachable!("By the callee"),
         }
         Ok(())
@@ -926,7 +921,7 @@ mod tests {
     fn parse_number() {
         let source = "1;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
+        expected.push_const(Value::Number(1.));
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
@@ -940,7 +935,7 @@ mod tests {
     fn parse_number_inside_parens() {
         let source = "(101);";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(101.));
+        expected.push_const(Value::Number(101.));
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
@@ -954,8 +949,8 @@ mod tests {
     fn parse_addition() {
         let source = "1+2;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpAdd);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -970,8 +965,8 @@ mod tests {
     fn parse_sub() {
         let source = "1-2;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpSubtract);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -986,8 +981,8 @@ mod tests {
     fn parse_mul() {
         let source = "1*2;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpMultiply);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -1002,8 +997,8 @@ mod tests {
     fn parse_div() {
         let source = "1/2;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpDivide);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -1018,12 +1013,12 @@ mod tests {
     fn parse_expr() {
         let source = "(10 + 10) * (3 - 1 / (4));";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(10.));
-        expected.push_opconst(Value::Number(10.));
+        expected.push_const(Value::Number(10.));
+        expected.push_const(Value::Number(10.));
         expected.push_opcode(OpCode::OpAdd);
-        expected.push_opconst(Value::Number(3.));
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(4.));
+        expected.push_const(Value::Number(3.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(4.));
         expected.push_opcode(OpCode::OpDivide);
         expected.push_opcode(OpCode::OpSubtract);
         expected.push_opcode(OpCode::OpMultiply);
@@ -1040,14 +1035,14 @@ mod tests {
     fn parse_many_parens() {
         let source = "(((1+2)-3)*4)/5;";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpAdd);
-        expected.push_opconst(Value::Number(3.));
+        expected.push_const(Value::Number(3.));
         expected.push_opcode(OpCode::OpSubtract);
-        expected.push_opconst(Value::Number(4.));
+        expected.push_const(Value::Number(4.));
         expected.push_opcode(OpCode::OpMultiply);
-        expected.push_opconst(Value::Number(5.));
+        expected.push_const(Value::Number(5.));
         expected.push_opcode(OpCode::OpDivide);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -1063,12 +1058,12 @@ mod tests {
         let source = "!(5 - 4 > 3 * 2 == !nil);";
         let mut expected = Chunk::new();
         // 5 - 4
-        expected.push_opconst(Value::Number(5.));
-        expected.push_opconst(Value::Number(4.));
+        expected.push_const(Value::Number(5.));
+        expected.push_const(Value::Number(4.));
         expected.push_opcode(OpCode::OpSubtract);
         // 3 * 2
-        expected.push_opconst(Value::Number(3.));
-        expected.push_opconst(Value::Number(2.));
+        expected.push_const(Value::Number(3.));
+        expected.push_const(Value::Number(2.));
         expected.push_opcode(OpCode::OpMultiply);
         // (5 - 4) > (3 * 2)
         expected.push_opcode(OpCode::OpGreater);
@@ -1092,7 +1087,7 @@ mod tests {
     fn parse_string() {
         let source = "\"Hello, world!\";";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::String(source[1..14].to_string()));
+        expected.push_const(Value::String(source[1..14].to_string()));
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
@@ -1106,9 +1101,9 @@ mod tests {
     fn parse_defvar() {
         let source = "var eita = 1;";
         let mut expected = Chunk::new();
-        expected.push_const(Value::String("eita".to_string()));
-        expected.push_opconst(Value::Number(1.));
-        expected.push_defvar(0, OpCode::OpDefGlobal);
+        expected.push_value(Value::String("eita".to_string()));
+        expected.push_const(Value::Number(1.));
+        expected.push_defvar(OpCode::OpDefGlobal(0));
         expected.push_opcode(OpCode::OpReturn);
 
         let mut chunk = Chunk::new();
@@ -1121,19 +1116,21 @@ mod tests {
     fn parse_getvar() {
         let source = "var eita = 1; print eita;";
         let mut expected = Chunk::new();
-        expected.push_const(Value::String("eita".to_string()));
-        expected.push_opconst(Value::Number(1.));
-        expected.push_defvar(0, OpCode::OpDefGlobal);
+        expected.push_value(Value::String("eita".to_string()));
+        expected.push_const(Value::Number(1.));
+        expected.push_defvar(OpCode::OpDefGlobal(0));
         // We have to add "eita" again since everytime a variable
         // is encountered we add it to the constants table
-        expected.push_const(Value::String("eita".to_string()));
-        expected.push_getvar(2, OpCode::OpGetGlobal);
+        expected.push_value(Value::String("eita".to_string()));
+        expected.push_getvar(OpCode::OpGetGlobal(2));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
         let mut chunk = Chunk::new();
         let mut parser = Parser::new(&source, &mut chunk);
         let _ = parser.compile().unwrap();
+        println!("{}", expected);
+        println!("{}", chunk);
         assert_eq!(expected, chunk);
     }
 
@@ -1141,13 +1138,13 @@ mod tests {
     fn global_inside_scope() {
         let source = "var eita = 1; {print eita;}";
         let mut expected = Chunk::new();
-        expected.push_const(Value::String("eita".to_string()));
-        expected.push_opconst(Value::Number(1.));
-        expected.push_defvar(0, OpCode::OpDefGlobal);
+        expected.push_value(Value::String("eita".to_string()));
+        expected.push_const(Value::Number(1.));
+        expected.push_defvar(OpCode::OpDefGlobal(0));
         // We have to add "eita" again since everytime a variable
         // is encountered we add it to the constants table
-        expected.push_const(Value::String("eita".to_string()));
-        expected.push_getvar(2, OpCode::OpGetGlobal);
+        expected.push_value(Value::String("eita".to_string()));
+        expected.push_getvar(OpCode::OpGetGlobal(2));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
@@ -1161,8 +1158,8 @@ mod tests {
     fn scoped_var() {
         let source = "{var eita = 1; print eita;}";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_getvar(0, OpCode::OpGetLocal);
+        expected.push_const(Value::Number(1.));
+        expected.push_getvar(OpCode::OpGetLocal(0));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
@@ -1178,12 +1175,12 @@ mod tests {
     fn nested_scope_var() {
         let source = "{var eita = 1; {var eita = \"value\"; print eita;} print eita;}";
         let mut expected = Chunk::new();
-        expected.push_opconst(Value::Number(1.));
-        expected.push_opconst(Value::String("value".to_string()));
-        expected.push_getvar(1, OpCode::OpGetLocal);
+        expected.push_const(Value::Number(1.));
+        expected.push_const(Value::String("value".to_string()));
+        expected.push_getvar(OpCode::OpGetLocal(1));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
-        expected.push_getvar(0, OpCode::OpGetLocal);
+        expected.push_getvar(OpCode::OpGetLocal(0));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);

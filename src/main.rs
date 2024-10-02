@@ -72,10 +72,10 @@ fn main() -> miette::Result<()> {
         }
         Commands::Chunk => {
             let mut chunks = Chunk::new();
-            chunks.push_opconst(Value::Number(1.));
-            chunks.push_opconst(Value::Number(5.));
+            chunks.push_const(Value::Number(1.));
+            chunks.push_const(Value::Number(5.));
             chunks.push_opcode(OpCode::OpAdd);
-            chunks.push_opconst(Value::Number(6.));
+            chunks.push_const(Value::Number(6.));
             chunks.push_opcode(OpCode::OpMultiply);
 
             chunks.push_opcode(OpCode::OpReturn);

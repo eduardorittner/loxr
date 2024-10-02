@@ -10,7 +10,6 @@ use std::str::SplitAsciiWhitespace;
 
 pub struct Vm<W: io::Write> {
     pub code: Chunk,
-    pc: u16,
     debug: bool,
     stack: Vec<Value>,
     globals: HashMap<String, Value>,
@@ -21,12 +20,27 @@ impl Vm<Cursor<Vec<u8>>> {
     pub fn test() -> Self {
         Self {
             code: Chunk::new(),
-            pc: 0,
             debug: false,
             stack: Vec::new(),
             globals: HashMap::new(),
             out: Cursor::new(Vec::new()),
         }
+    }
+
+    pub fn test_with_chunk(code: Chunk) -> Self {
+        Self {
+            code,
+            debug: false,
+            stack: Vec::new(),
+            globals: HashMap::new(),
+            out: Cursor::new(Vec::new()),
+        }
+    }
+
+    pub fn test_with_debug() -> Self {
+        let mut vm = Vm::test();
+        vm.debug = true;
+        vm
     }
 
     pub fn read_out(&mut self) -> String {
@@ -46,7 +60,6 @@ impl Vm<Stdout> {
         let out = std::io::stdout();
         Self {
             code: Chunk::new(),
-            pc: 0,
             debug: false,
             stack: Vec::new(),
             globals: HashMap::new(),
@@ -57,7 +70,6 @@ impl Vm<Stdout> {
     pub fn with_chunk(code: Chunk) -> Self {
         Self {
             code,
-            pc: 0,
             debug: false,
             stack: Vec::new(),
             globals: HashMap::new(),
@@ -78,40 +90,6 @@ impl<T: Write> Vm<T> {
         vm
     }
 
-    fn read_byte(&mut self) -> OpCode {
-        let byte = self.code.code_at(self.pc);
-        if self.pc > 254 {
-            panic!("Overflow of chunk")
-        }
-        self.pc += 1;
-        byte
-    }
-
-    fn read_const(&mut self) -> Value {
-        let byte = self.code.const_at(self.pc);
-        if self.pc > 254 {
-            panic!("Overflow of chunk")
-        }
-        self.pc += 1;
-        byte
-    }
-
-    fn read_index(&mut self) -> u8 {
-        let byte = self.code.index_at(self.pc);
-        if self.pc > 254 {
-            panic!("Overflow of chunk")
-        }
-        self.pc += 1;
-        byte
-    }
-
-    fn read_jump(&mut self) -> u16 {
-        let low = self.code.index_at(self.pc);
-        let high = self.code.index_at(self.pc + 1);
-        self.pc += 2;
-        (high as u16) << 8 | low as u16
-    }
-
     fn print_stack(&mut self) {
         for value in &self.stack {
             let _ = self.out.write_fmt(format_args!("[ {} ]", value));
@@ -130,138 +108,152 @@ impl<T: Write> Vm<T> {
             self.print_stack();
             let _ = self.out.write_fmt(format_args!(
                 "{:04} {}\n",
-                self.pc,
-                self.code.code_at(self.pc)
+                self.code.pc(),
+                self.code.current_op()
             ));
         }
-        match self.read_byte() {
-            OpCode::OpReturn => return Ok(true),
-            OpCode::OpConstant => {
-                let value = self.read_const();
-                self.stack.push(value);
-            }
-            OpCode::OpNot => {
-                let a = self.stack.last_mut().expect("Stack empty");
-                *a = Value::Bool(a.is_falsey());
-            }
-            OpCode::OpNegate => {
-                let a = self.stack.last_mut().expect("Stack empty");
-                match a {
-                    Value::Number(n) => *n = -*n,
-                    _ => return Err(miette::miette!("Can't negate a non numeric value: {a}")),
-                }
-            }
-            OpCode::OpAdd => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
 
-                match (a, b) {
-                    (Value::Number(a), Value::Number(b)) => self.stack.push(Value::Number(a + b)),
-                    (Value::String(a), Value::String(b)) => {
-                        let mut b = b.clone(); // Ewwwww why clone
-                        b.push_str(&a);
-                        self.stack.push(Value::String(b))
+        if let Some(op) = self.code.next() {
+            match op {
+                OpCode::OpReturn => return Ok(true),
+                OpCode::OpNot => {
+                    let a = self.stack.last_mut().expect("Stack empty");
+                    *a = Value::Bool(a.is_falsey());
+                }
+                OpCode::OpNegate => {
+                    let a = self.stack.last_mut().expect("Stack empty");
+                    match a {
+                        Value::Number(n) => *n = -*n,
+                        _ => return Err(miette::miette!("Can't negate a non numeric value: {a}")),
                     }
-                    (a, b) => {
+                }
+                OpCode::OpAdd => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+
+                    match (a, b) {
+                        (Value::Number(a), Value::Number(b)) => {
+                            self.stack.push(Value::Number(a + b))
+                        }
+                        (Value::String(a), Value::String(b)) => {
+                            let mut b = b.clone(); // Ewwwww why clone
+                            b.push_str(&a);
+                            self.stack.push(Value::String(b))
+                        }
+                        (a, b) => {
+                            return Err(miette::miette!(
+                                "Can't add values of type: {a}, {b} together"
+                            ))
+                        }
+                    }
+                }
+                OpCode::OpSubtract => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+
+                    match (a, b) {
+                        (Value::Number(a), Value::Number(b)) => {
+                            self.stack.push(Value::Number(b - a))
+                        }
+                        (a, b) => {
+                            return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
+                        }
+                    }
+                }
+                OpCode::OpMultiply => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+                    match (a, b) {
+                        (Value::Number(a), Value::Number(b)) => {
+                            self.stack.push(Value::Number(a * b))
+                        }
+                        (a, b) => {
+                            return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
+                        }
+                    }
+                }
+                OpCode::OpDivide => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+                    match (a, b) {
+                        (Value::Number(a), Value::Number(b)) => {
+                            self.stack.push(Value::Number(b / a))
+                        }
+                        (a, b) => {
+                            return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
+                        }
+                    }
+                }
+                OpCode::OpNil => self.stack.push(Value::Nil),
+                OpCode::OpTrue => self.stack.push(Value::Bool(true)),
+                OpCode::OpFalse => self.stack.push(Value::Bool(false)),
+                OpCode::OpEq => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+                    self.stack.push(Value::Bool(a == b));
+                }
+                OpCode::OpGreater => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+                    self.stack.push(Value::Bool(b > a));
+                }
+                OpCode::OpLess => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let b = self.stack.pop().expect("Stack empty");
+                    self.stack.push(Value::Bool(b < a));
+                }
+                OpCode::OpPrint => {
+                    let a = self.stack.pop().expect("Stack empty");
+                    let _ = self.out.write_fmt(format_args!("{a}\n"));
+                }
+                OpCode::OpPop => {
+                    let _ = self.stack.pop();
+                }
+                OpCode::OpConstant(i) => {
+                    if let Some(value) = self.code.get_const(i) {
+                        self.stack.push(value);
+                    } else {
+                        return Err(miette::miette!("No Value at index: {}", i));
+                    }
+                }
+                OpCode::OpDefGlobal(i) => {
+                    if let Some(name) = self.code.get_const(i) {
+                        let value = self.stack.pop().expect("Stack empty");
+                        self.globals.insert(name.to_string(), value);
+                    } else {
+                        return Err(miette::miette!("No const at index: {}", i));
+                    }
+                }
+                OpCode::OpGetGlobal(i) => {
+                    if let Some(name) = self.code.get_const(i) {
+                        if let Some(value) = self.globals.get(&name.to_string()) {
+                            self.stack.push(value.clone());
+                        } else {
+                            return Err(miette::miette!("Global variable {name} not defined"));
+                        }
+                    } else {
+                        return Err(miette::miette!("No const at index: {}", i));
+                    }
+                }
+                OpCode::OpDefLocal(i) => {
+                    if let Some(new_val) = self.stack.last() {
+                        *self.stack.get_mut(i as usize).unwrap() = new_val.clone();
+                    } else {
                         return Err(miette::miette!(
-                            "Can't add values of type: {a}, {b} together"
-                        ))
+                            "Stack is empty when trying to define a new local variable."
+                        ));
                     }
                 }
-            }
-            OpCode::OpSubtract => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-
-                match (a, b) {
-                    (Value::Number(a), Value::Number(b)) => self.stack.push(Value::Number(b - a)),
-                    (a, b) => {
-                        return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
+                OpCode::OpGetLocal(i) => {
+                    self.stack.push(self.stack.get(i as usize).unwrap().clone());
+                }
+                OpCode::OpJumpIfFalse(jump) => {
+                    let cond = self.stack.last().unwrap();
+                    if cond.is_falsey() {
+                        self.code.jump(jump)
                     }
                 }
-            }
-            OpCode::OpMultiply => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-                match (a, b) {
-                    (Value::Number(a), Value::Number(b)) => self.stack.push(Value::Number(a * b)),
-                    (a, b) => {
-                        return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
-                    }
-                }
-            }
-            OpCode::OpDivide => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-                match (a, b) {
-                    (Value::Number(a), Value::Number(b)) => self.stack.push(Value::Number(b / a)),
-                    (a, b) => {
-                        return Err(miette::miette!("Can't divide non numeric values {a}, {b}"))
-                    }
-                }
-            }
-            OpCode::OpNil => self.stack.push(Value::Nil),
-            OpCode::OpTrue => self.stack.push(Value::Bool(true)),
-            OpCode::OpFalse => self.stack.push(Value::Bool(false)),
-            OpCode::OpEq => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-                self.stack.push(Value::Bool(a == b));
-            }
-            OpCode::OpGreater => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-                self.stack.push(Value::Bool(b > a));
-            }
-            OpCode::OpLess => {
-                let a = self.stack.pop().expect("Stack empty");
-                let b = self.stack.pop().expect("Stack empty");
-                self.stack.push(Value::Bool(b < a));
-            }
-            OpCode::OpPrint => {
-                let a = self.stack.pop().expect("Stack empty");
-                let _ = self.out.write_fmt(format_args!("{a}\n"));
-            }
-            OpCode::OpPop => {
-                let _ = self.stack.pop();
-            }
-            OpCode::OpDefGlobal => {
-                let name = self.read_const();
-                let value = self.stack.pop().expect("Stack empty");
-                self.globals.insert(name.to_string(), value);
-            }
-            OpCode::OpGetGlobal => {
-                let name = self.read_const();
-                let value = self.globals.get(&name.to_string()); // TODO: implement Into<&str> for Value
-                match value {
-                    Some(value) => self.stack.push(value.clone()),
-                    None => return Err(miette::miette!("Global variable {name} not defined")),
-                }
-            }
-            OpCode::OpDefLocal => {
-                let index = self.read_index();
-                let new_val = self.stack.last().unwrap().clone();
-                *self.stack.get_mut(index as usize).unwrap() = new_val;
-            }
-            OpCode::OpGetLocal => {
-                let index = self.read_index();
-                self.stack
-                    .push(self.stack.get(index as usize).unwrap().clone());
-            }
-            OpCode::OpJumpIfFalse => {
-                let jump = self.read_jump();
-                let cond = self.stack.last().unwrap();
-                if cond.is_falsey() {
-                    self.pc += jump;
-                }
-            }
-            OpCode::OpJump => {
-                let jump = self.read_jump();
-                self.pc += jump - 1;
-            }
-            OpCode::OpLoop => {
-                let jump = self.read_jump();
-                self.pc -= jump;
+                OpCode::OpJump(jump) => self.code.jump(jump),
             }
         };
         Ok(false)
@@ -287,7 +279,7 @@ mod tests {
     #[test]
     pub fn string() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::String("string".to_string()));
+        code.push_const(Value::String("string".to_string()));
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
         let res = vm.run_exact(1).unwrap();
@@ -297,7 +289,7 @@ mod tests {
     #[test]
     pub fn simple_return() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(1.));
+        code.push_const(Value::Number(1.));
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
         let _ = vm.run().unwrap();
@@ -308,8 +300,8 @@ mod tests {
     #[test]
     pub fn simple_addition() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(1.));
-        code.push_opconst(Value::Number(1.));
+        code.push_const(Value::Number(1.));
+        code.push_const(Value::Number(1.));
         code.push_opcode(OpCode::OpAdd);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -320,8 +312,8 @@ mod tests {
     #[test]
     pub fn simple_subtraction() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(5.));
-        code.push_opconst(Value::Number(2.));
+        code.push_const(Value::Number(5.));
+        code.push_const(Value::Number(2.));
         code.push_opcode(OpCode::OpSubtract);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -332,7 +324,7 @@ mod tests {
     #[test]
     pub fn negate() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(5.));
+        code.push_const(Value::Number(5.));
         code.push_opcode(OpCode::OpNegate);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -343,8 +335,8 @@ mod tests {
     #[test]
     pub fn simple_multiply() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(1.));
-        code.push_opconst(Value::Number(10.));
+        code.push_const(Value::Number(1.));
+        code.push_const(Value::Number(10.));
         code.push_opcode(OpCode::OpMultiply);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -355,8 +347,8 @@ mod tests {
     #[test]
     pub fn simple_divide() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(4.));
-        code.push_opconst(Value::Number(2.));
+        code.push_const(Value::Number(4.));
+        code.push_const(Value::Number(2.));
         code.push_opcode(OpCode::OpDivide);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -367,8 +359,8 @@ mod tests {
     #[test]
     pub fn equality() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Bool(true));
-        code.push_opconst(Value::Bool(true));
+        code.push_const(Value::Bool(true));
+        code.push_const(Value::Bool(true));
         code.push_opcode(OpCode::OpEq);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -379,8 +371,8 @@ mod tests {
     #[test]
     pub fn equality_false() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Bool(true));
-        code.push_opconst(Value::Bool(false));
+        code.push_const(Value::Bool(true));
+        code.push_const(Value::Bool(false));
         code.push_opcode(OpCode::OpEq);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -391,8 +383,8 @@ mod tests {
     #[test]
     pub fn equality_string() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::String("string".to_string()));
-        code.push_opconst(Value::String("string".to_string()));
+        code.push_const(Value::String("string".to_string()));
+        code.push_const(Value::String("string".to_string()));
         code.push_opcode(OpCode::OpEq);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -406,12 +398,12 @@ mod tests {
         // !(5 - 4 > 3 * 2 == !nil)
         let mut code = Chunk::new();
         // 5 - 4
-        code.push_opconst(Value::Number(5.));
-        code.push_opconst(Value::Number(4.));
+        code.push_const(Value::Number(5.));
+        code.push_const(Value::Number(4.));
         code.push_opcode(OpCode::OpSubtract);
         // 3 * 2
-        code.push_opconst(Value::Number(3.));
-        code.push_opconst(Value::Number(2.));
+        code.push_const(Value::Number(3.));
+        code.push_const(Value::Number(2.));
         code.push_opcode(OpCode::OpMultiply);
         // (5 - 4) > (3 * 2)
         code.push_opcode(OpCode::OpGreater);
@@ -431,8 +423,8 @@ mod tests {
     #[test]
     pub fn add_strings() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::String("Hello, ".to_string()));
-        code.push_opconst(Value::String("world!".to_string()));
+        code.push_const(Value::String("Hello, ".to_string()));
+        code.push_const(Value::String("world!".to_string()));
         code.push_opcode(OpCode::OpAdd);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -443,8 +435,8 @@ mod tests {
     #[test]
     pub fn add_string_and_number() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::String(", world!".to_string()));
-        code.push_opconst(Value::Number(1.));
+        code.push_const(Value::String(", world!".to_string()));
+        code.push_const(Value::Number(1.));
         code.push_opcode(OpCode::OpAdd);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -455,11 +447,11 @@ mod tests {
     #[test]
     pub fn var() {
         let mut code = Chunk::new();
-        code.push_const(Value::String("myvar".to_string()));
-        code.push_opconst(Value::Number(1.));
-        code.push_defvar(0, OpCode::OpDefGlobal);
-        code.push_opconst(Value::Number(5.));
-        code.push_getvar(0, OpCode::OpGetGlobal);
+        code.push_value(Value::String("myvar".to_string()));
+        code.push_const(Value::Number(1.));
+        code.push_defvar(OpCode::OpDefGlobal(0));
+        code.push_const(Value::Number(5.));
+        code.push_getvar(OpCode::OpGetGlobal(0));
         code.push_opcode(OpCode::OpMultiply);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -470,29 +462,32 @@ mod tests {
     #[test]
     pub fn strings_var_add() {
         let mut code = Chunk::new();
-        code.push_const(Value::String("myvar".to_string()));
-        code.push_opconst(Value::String("hello, ".to_string()));
-        code.push_defvar(0, OpCode::OpDefGlobal);
+        code.push_value(Value::String("myvar".to_string()));
+        code.push_const(Value::String("hello, ".to_string()));
+        code.push_defvar(OpCode::OpDefGlobal(0));
 
-        code.push_const(Value::String("mysecondvar".to_string()));
-        code.push_opconst(Value::String("world!".to_string()));
-        code.push_defvar(1, OpCode::OpDefGlobal);
+        code.push_value(Value::String("mysecondvar".to_string()));
+        code.push_const(Value::String("world!".to_string()));
+        code.push_defvar(OpCode::OpDefGlobal(1));
 
-        code.push_getvar(0, OpCode::OpGetGlobal);
-        code.push_getvar(1, OpCode::OpGetGlobal);
+        code.push_getvar(OpCode::OpGetGlobal(0));
+        code.push_getvar(OpCode::OpGetGlobal(1));
         code.push_opcode(OpCode::OpAdd);
+        code.push_opcode(OpCode::OpPrint);
         code.push_opcode(OpCode::OpReturn);
-        let mut vm = Vm::with_chunk(code);
-        let res = vm.run_exact(8).unwrap();
-        assert_eq!(res, Value::String("hello, world!".to_string()));
+        let mut vm = Vm::test_with_chunk(code);
+        let _ = vm.run().unwrap();
+        let res = vm.read_out();
+        let res = res.trim_end();
+        assert_eq!(res, "hello, world!".to_string());
     }
 
     #[test]
     pub fn local_var() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(10.));
-        code.push_getvar(0, OpCode::OpGetLocal);
-        code.push_opconst(Value::Number(2.));
+        code.push_const(Value::Number(10.));
+        code.push_getvar(OpCode::OpGetLocal(0));
+        code.push_const(Value::Number(2.));
         code.push_opcode(OpCode::OpMultiply);
         code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_chunk(code);
@@ -503,14 +498,14 @@ mod tests {
     #[test]
     pub fn local_vars() {
         let mut code = Chunk::new();
-        code.push_opconst(Value::Number(10.));
-        code.push_opconst(Value::Number(2.));
-        code.push_getvar(1, OpCode::OpGetLocal);
-        code.push_getvar(0, OpCode::OpGetLocal);
+        code.push_const(Value::Number(10.));
+        code.push_const(Value::Number(2.));
+        code.push_getvar(OpCode::OpGetLocal(1));
+        code.push_getvar(OpCode::OpGetLocal(0));
         code.push_opcode(OpCode::OpDivide);
 
-        code.push_opconst(Value::Number(2.));
-        code.push_opconst(Value::Number(10.));
+        code.push_const(Value::Number(2.));
+        code.push_const(Value::Number(10.));
         code.push_opcode(OpCode::OpDivide);
         code.push_opcode(OpCode::OpEq);
         code.push_opcode(OpCode::OpReturn);

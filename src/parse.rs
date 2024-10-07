@@ -1,21 +1,22 @@
+use crate::value::{Function, FunctionType};
 use crate::{lex::Token, lex::TokenKind, Chunk, Lexer, OpCode, Value};
 use miette::LabeledSpan;
 use std::collections::HashMap;
 
-type ParseFn<'de> = fn(&mut Parser<'de>, Token<'de>, bool) -> miette::Result<()>;
+type ParseFn<'de, 'fun> = fn(&mut Parser<'de, 'fun>, Token<'de>, bool) -> miette::Result<()>;
 
 #[derive(Debug, PartialEq, PartialOrd, Eq)]
-struct ParseRule<'de> {
-    infix: Option<ParseFn<'de>>,
-    prefix: Option<ParseFn<'de>>,
+struct ParseRule<'de, 'fun> {
+    infix: Option<ParseFn<'de, 'fun>>,
+    prefix: Option<ParseFn<'de, 'fun>>,
     prec: Precedence,
 }
 
-pub struct Parser<'de> {
+pub struct Parser<'de, 'fun> {
     lexer: Lexer<'de>,
-    whole: &'de str,
-    chunk: &'de mut Chunk,
-    rules: HashMap<TokenKind, ParseRule<'de>>,
+    fun: &'fun mut Function,
+    fn_type: FunctionType,
+    rules: HashMap<TokenKind, ParseRule<'de, 'fun>>,
     scope: Scope<'de>,
 }
 
@@ -34,8 +35,14 @@ struct Scope<'de> {
 
 impl<'de> Scope<'de> {
     fn new() -> Self {
+        let mut locals = Vec::new();
+        locals.push(Local {
+            name: "reserved",
+            depth: 0,
+            defined: true,
+        });
         Self {
-            locals: Vec::new(),
+            locals,
             scope_depth: 0,
         }
     }
@@ -104,21 +111,21 @@ impl Precedence {
     }
 }
 
-impl<'de> Parser<'de> {
-    pub fn new(input: &'de str, chunk: &'de mut Chunk) -> Self {
+impl<'de, 'fun> Parser<'de, 'fun> {
+    pub fn new(source: &'de str, fun: &'fun mut Function, fn_type: FunctionType) -> Self {
         use TokenKind::*;
         Parser {
-            lexer: Lexer::new(input),
-            whole: input,
-            chunk,
+            lexer: Lexer::new(source),
+            fun,
+            fn_type,
             scope: Scope::new(),
             rules: HashMap::from([
                 (
                     LeftParen,
                     ParseRule {
                         prefix: Some(Parser::parse_group),
-                        infix: None,
-                        prec: Precedence::None,
+                        infix: Some(Parser::parse_call),
+                        prec: Precedence::Call,
                     },
                 ),
                 (
@@ -422,7 +429,7 @@ impl<'de> Parser<'de> {
             .take_while(|x| x.depth == self.scope.scope_depth);
 
         let n = local_vars.fold(0, |acc: usize, x| {
-            self.chunk.push_opcode(OpCode::OpPop);
+            self.fun.code.push_opcode(OpCode::OpPop);
             acc + 1
         });
 
@@ -430,18 +437,18 @@ impl<'de> Parser<'de> {
         self.scope.end_scope();
     }
 
-    fn get_rule(&self, kind: TokenKind) -> &ParseRule<'de> {
+    fn get_rule(&self, kind: TokenKind) -> &ParseRule<'de, 'fun> {
         self.rules
             .get(&kind)
             .expect("HashMap contains all possible TokenKind variants")
     }
 
-    pub fn compile(&mut self) -> miette::Result<&Chunk> {
+    pub fn compile(&mut self) -> miette::Result<()> {
         while self.lexer.peek().is_some_and(|x| x.is_ok()) {
             self.parse_decl()?;
         }
-        self.chunk.push_opcode(OpCode::OpReturn);
-        Ok(self.chunk)
+        self.fun.code.push_opcode(OpCode::OpReturn);
+        Ok(())
     }
 
     fn parse_decl(&mut self) -> miette::Result<()> {
@@ -454,8 +461,55 @@ impl<'de> Parser<'de> {
 
         match token.kind {
             TokenKind::Var => self.parse_var_decl(),
+            TokenKind::Fun => self.parse_fun_decl(),
             _ => self.parse_statement(),
         }
+    }
+
+    fn parse_fun_decl(&mut self) -> miette::Result<()> {
+        let _ = self
+            .lexer
+            .expect(TokenKind::Var, "Caller should have checked");
+        let token = self
+            .lexer
+            .expect(TokenKind::Ident, "Expected identifier after 'var' keyword")?;
+
+        // Declare variable with the following name
+        if let Some(index) = self.parse_variable(token, true)? {
+            let offset = self.parse_fun()?;
+            self.lexer.sync(offset - self.lexer.offset);
+            self.define_var(Some(index));
+            Ok(())
+        } else {
+            // TODO: miette spans
+            Err(miette::miette!("No function name provided"))
+        }
+    }
+
+    fn parse_fun(&mut self) -> miette::Result<usize> {
+        let offset;
+        let mut fun = Function::new();
+        // TODO: please dont copy the whole source code for every function invocation
+        let source = self.lexer.source();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Function);
+        parser.lexer.sync(self.lexer.offset);
+        parser.scope.begin_scope();
+        parser
+            .lexer
+            .expect(TokenKind::LeftParen, "Expected '(' after function name")?;
+        parser
+            .lexer
+            .expect(TokenKind::RightParen, "Expected ')' after parameters")?;
+        parser.lexer.expect(
+            TokenKind::LeftBracket,
+            "Expected '{{' to start function block",
+        )?;
+
+        parser.parse_block()?;
+
+        offset = parser.lexer.offset;
+        self.fun.code.push_const(Value::Fun(fun));
+        Ok(offset)
     }
 
     fn parse_var_decl(&mut self) -> miette::Result<()> {
@@ -476,7 +530,7 @@ impl<'de> Parser<'de> {
                 let _ = self.lexer.next();
                 self.parse_expr()?;
             }
-            _ => self.chunk.push_opcode(OpCode::OpNil),
+            _ => self.fun.code.push_opcode(OpCode::OpNil),
         }
         let _ = self
             .lexer
@@ -487,7 +541,9 @@ impl<'de> Parser<'de> {
     }
 
     fn define_var(&mut self, index: Option<u32>) {
-        if let Some(index) = index { self.chunk.push_defvar(OpCode::OpDefGlobal(index)) }
+        if let Some(index) = index {
+            self.fun.code.push_defvar(OpCode::OpDefGlobal(index))
+        }
     }
 
     fn resolve_local_var(&mut self, token: Token) -> miette::Result<Option<u32>> {
@@ -528,11 +584,11 @@ impl<'de> Parser<'de> {
                 if can_assign {
                     self.lexer.next();
                     self.parse_expr()?;
-                    self.chunk.push_defvar(set_op)
+                    self.fun.code.push_defvar(set_op)
                 };
             }
             _ => {
-                self.chunk.push_getvar(get_op);
+                self.fun.code.push_getvar(get_op);
             }
         };
         Ok(())
@@ -565,7 +621,7 @@ impl<'de> Parser<'de> {
     }
 
     fn global_variable(&mut self, token: Token<'de>, _: bool) -> u32 {
-        self.chunk.push_value(Value::String(token.to_string()))
+        self.fun.code.push_value(Value::String(token.to_string()))
     }
 
     fn parse_statement(&mut self) -> miette::Result<()> {
@@ -625,7 +681,7 @@ impl<'de> Parser<'de> {
         };
 
         // Main loop body is right after initializer expression
-        let mut loop_start = self.chunk.last_op();
+        let mut loop_start = self.fun.code.last_op();
 
         let mut break_jump: Option<usize> = None;
 
@@ -641,8 +697,8 @@ impl<'de> Parser<'de> {
                     .lexer
                     .expect(TokenKind::Semicolon, "Expected ';' after expression")?;
                 // We only exit the loop from the condition clause
-                break_jump = Some(self.chunk.push_jump(OpCode::OpJumpIfFalse(0)));
-                self.chunk.push_opcode(OpCode::OpPop);
+                break_jump = Some(self.fun.code.push_jump(OpCode::OpJumpIfFalse(0)));
+                self.fun.code.push_opcode(OpCode::OpPop);
             }
         };
 
@@ -654,10 +710,10 @@ impl<'de> Parser<'de> {
             // Increment clause exists
             _ => {
                 // In the first iteration we don't evaluate the increment clause and just skip it
-                let body_jump = self.chunk.push_jump(OpCode::OpJump(0));
-                let increment_start = self.chunk.next_op();
+                let body_jump = self.fun.code.push_jump(OpCode::OpJump(0));
+                let increment_start = self.fun.code.next_op();
                 self.parse_expr()?;
-                self.chunk.push_opcode(OpCode::OpPop);
+                self.fun.code.push_opcode(OpCode::OpPop);
 
                 self.lexer.expect(
                     TokenKind::RightParen,
@@ -665,18 +721,18 @@ impl<'de> Parser<'de> {
                 )?;
 
                 // Jump to condition clause
-                self.chunk.push_loop(loop_start);
+                self.fun.code.push_loop(loop_start);
                 loop_start = increment_start;
                 self.patch_jump(body_jump);
             }
         };
 
         self.parse_statement()?;
-        self.chunk.push_loop(loop_start);
+        self.fun.code.push_loop(loop_start);
 
         if let Some(jump) = break_jump {
             self.patch_jump(jump);
-            self.chunk.push_opcode(OpCode::OpPop);
+            self.fun.code.push_opcode(OpCode::OpPop);
         };
 
         self.scope.end_scope();
@@ -684,7 +740,7 @@ impl<'de> Parser<'de> {
     }
 
     fn parse_while_statement(&mut self) -> miette::Result<()> {
-        let loop_start = self.chunk.next_op();
+        let loop_start = self.fun.code.next_op();
         self.lexer
             .expect(TokenKind::LeftParen, "Expected '(' after \"while\" keyword")?;
         self.parse_expr()?;
@@ -693,14 +749,14 @@ impl<'de> Parser<'de> {
             "Expected closing '(' after condition",
         )?;
 
-        let break_jump = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
-        self.chunk.push_opcode(OpCode::OpPop);
+        let break_jump = self.fun.code.push_jump(OpCode::OpJumpIfFalse(0));
+        self.fun.code.push_opcode(OpCode::OpPop);
 
         self.parse_statement()?;
 
-        self.chunk.push_loop(loop_start);
+        self.fun.code.push_loop(loop_start);
         self.patch_jump(break_jump);
-        self.chunk.push_opcode(OpCode::OpPop);
+        self.fun.code.push_opcode(OpCode::OpPop);
         Ok(())
     }
 
@@ -711,14 +767,14 @@ impl<'de> Parser<'de> {
         self.lexer
             .expect(TokenKind::RightParen, "Expected '(' after condition")?;
 
-        let else_offset = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
-        self.chunk.push_opcode(OpCode::OpPop);
+        let else_offset = self.fun.code.push_jump(OpCode::OpJumpIfFalse(0));
+        self.fun.code.push_opcode(OpCode::OpPop);
         self.parse_statement()?;
 
-        let if_offset = self.chunk.push_jump(OpCode::OpJump(0));
+        let if_offset = self.fun.code.push_jump(OpCode::OpJump(0));
 
         self.patch_jump(else_offset);
-        self.chunk.push_opcode(OpCode::OpPop);
+        self.fun.code.push_opcode(OpCode::OpPop);
 
         if let Some(Ok(token)) = self.lexer.peek() {
             if let TokenKind::Else = token.kind {
@@ -731,10 +787,11 @@ impl<'de> Parser<'de> {
     }
 
     fn patch_jump(&mut self, from: usize) {
-        self.chunk.patch_jump(from, self.chunk.last_op());
+        self.fun.code.patch_jump(from, self.fun.code.last_op());
     }
 
     fn parse_block(&mut self) -> miette::Result<()> {
+        let token = self.lexer.peek();
         loop {
             let token = self.lexer.peek();
             match token {
@@ -743,6 +800,7 @@ impl<'de> Parser<'de> {
                         let _ = self.lexer.next();
                         return Ok(());
                     }
+                    //let _ = self.lexer.next();
                     self.parse_decl()?;
                 }
                 Some(Err(_)) => return Err(miette::miette!("couldn't parse thing inside block")),
@@ -756,7 +814,7 @@ impl<'de> Parser<'de> {
         let _ = self
             .lexer
             .expect(TokenKind::Semicolon, "Expected ';' after expression")?;
-        self.chunk.push_opcode(OpCode::OpPop);
+        self.fun.code.push_opcode(OpCode::OpPop);
         Ok(())
     }
 
@@ -766,7 +824,6 @@ impl<'de> Parser<'de> {
 
     fn parse_prec(&mut self, prec: Precedence) -> miette::Result<()> {
         let token = self.lexer.next().unwrap()?;
-
         let rules = self.get_rule(token.kind);
         let prefix_rule = rules.prefix;
 
@@ -775,7 +832,7 @@ impl<'de> Parser<'de> {
             None => return Err(miette::miette!{
                 labels = vec![LabeledSpan::at(token.offset..token.offset + token.source.len(), "this token")],
                 "No prefix rule for token '{token}'"
-            }.with_source_code(self.whole.to_string())),
+            }.with_source_code(self.lexer.source())),
         };
 
         let can_assign = prec <= Precedence::Assignment;
@@ -804,7 +861,7 @@ impl<'de> Parser<'de> {
                 None => return Err(miette::miette!{
                     labels = vec![LabeledSpan::at(token.offset..token.offset + token.source.len(), "this token")],
                     "No infix rule for token '{token}'"
-                }.with_source_code(self.whole.to_string())),
+                }.with_source_code(self.lexer.source())),
             };
             let _ = self.lexer.next();
 
@@ -827,10 +884,50 @@ impl<'de> Parser<'de> {
         Ok(())
     }
 
-    fn parse_and(&mut self, _: Token, _: bool) -> miette::Result<()> {
-        let jump = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
+    fn parse_call(&mut self, a: Token, _: bool) -> miette::Result<()> {
+        let n_args = self.parse_args()?;
+        self.fun.code.push_opcode(OpCode::OpCall(n_args));
+        Ok(())
+    }
 
-        self.chunk.push_opcode(OpCode::OpPop);
+    fn parse_args(&mut self) -> miette::Result<u8> {
+        let mut n_args: u8 = 0;
+        // TODO match on this
+        let token = self.lexer.peek().unwrap().as_ref().unwrap();
+
+        if token.kind != TokenKind::RightParen {
+            loop {
+                self.parse_expr()?;
+                n_args += 1;
+                match self.lexer.peek() {
+                    Some(Ok(t)) => match t.kind {
+                        TokenKind::Comma => {
+                            let _ = self.lexer.next();
+                        }
+                        _ => break,
+                    },
+                    Some(Err(e)) => {
+                        return Err(miette::miette!(
+                            "I don't know how to implement errors: {:?}",
+                            e
+                        ))
+                    }
+                    None => break,
+                }
+            }
+        }
+        self.lexer.expect(
+            TokenKind::RightParen,
+            "Expected ')' after function arguments",
+        )?;
+
+        Ok(n_args)
+    }
+
+    fn parse_and(&mut self, _: Token, _: bool) -> miette::Result<()> {
+        let jump = self.fun.code.push_jump(OpCode::OpJumpIfFalse(0));
+
+        self.fun.code.push_opcode(OpCode::OpPop);
         self.parse_prec(Precedence::And)?;
         self.patch_jump(jump);
         Ok(())
@@ -838,12 +935,12 @@ impl<'de> Parser<'de> {
 
     fn parse_or(&mut self, _: Token, _: bool) -> miette::Result<()> {
         // If the first condition is false, evaluate the second
-        let second_cond = self.chunk.push_jump(OpCode::OpJumpIfFalse(0));
+        let second_cond = self.fun.code.push_jump(OpCode::OpJumpIfFalse(0));
         // If the first condition is true, jump to the end
-        let first_cond = self.chunk.push_jump(OpCode::OpJump(0));
+        let first_cond = self.fun.code.push_jump(OpCode::OpJump(0));
 
         self.patch_jump(second_cond);
-        self.chunk.push_opcode(OpCode::OpPop);
+        self.fun.code.push_opcode(OpCode::OpPop);
         self.parse_prec(Precedence::Or)?;
 
         self.patch_jump(first_cond);
@@ -854,8 +951,8 @@ impl<'de> Parser<'de> {
         self.parse_prec(Precedence::Unary)?;
 
         match token.kind {
-            TokenKind::Minus => self.chunk.push_opcode(OpCode::OpNegate),
-            TokenKind::Bang => self.chunk.push_opcode(OpCode::OpNot),
+            TokenKind::Minus => self.fun.code.push_opcode(OpCode::OpNegate),
+            TokenKind::Bang => self.fun.code.push_opcode(OpCode::OpNot),
             _ => unreachable!("by the callee"),
         }
         Ok(())
@@ -867,16 +964,16 @@ impl<'de> Parser<'de> {
         self.parse_prec(prec)?;
 
         match token.kind {
-            TokenKind::Plus => self.chunk.push_opcode(OpCode::OpAdd),
-            TokenKind::Minus => self.chunk.push_opcode(OpCode::OpSubtract),
-            TokenKind::Star => self.chunk.push_opcode(OpCode::OpMultiply),
-            TokenKind::Slash => self.chunk.push_opcode(OpCode::OpDivide),
-            TokenKind::BangEq => self.chunk.push_opcodes(OpCode::OpEq, OpCode::OpNot),
-            TokenKind::EqEq => self.chunk.push_opcode(OpCode::OpEq),
-            TokenKind::Greater => self.chunk.push_opcode(OpCode::OpGreater),
-            TokenKind::GreaterEq => self.chunk.push_opcodes(OpCode::OpLess, OpCode::OpNot),
-            TokenKind::Less => self.chunk.push_opcode(OpCode::OpLess),
-            TokenKind::LessEq => self.chunk.push_opcodes(OpCode::OpGreater, OpCode::OpNot),
+            TokenKind::Plus => self.fun.code.push_opcode(OpCode::OpAdd),
+            TokenKind::Minus => self.fun.code.push_opcode(OpCode::OpSubtract),
+            TokenKind::Star => self.fun.code.push_opcode(OpCode::OpMultiply),
+            TokenKind::Slash => self.fun.code.push_opcode(OpCode::OpDivide),
+            TokenKind::BangEq => self.fun.code.push_opcodes(OpCode::OpEq, OpCode::OpNot),
+            TokenKind::EqEq => self.fun.code.push_opcode(OpCode::OpEq),
+            TokenKind::Greater => self.fun.code.push_opcode(OpCode::OpGreater),
+            TokenKind::GreaterEq => self.fun.code.push_opcodes(OpCode::OpLess, OpCode::OpNot),
+            TokenKind::Less => self.fun.code.push_opcode(OpCode::OpLess),
+            TokenKind::LessEq => self.fun.code.push_opcodes(OpCode::OpGreater, OpCode::OpNot),
             _ => unreachable!("By the callee"),
         }
         Ok(())
@@ -884,11 +981,11 @@ impl<'de> Parser<'de> {
 
     fn parse_literal(&mut self, token: Token, _: bool) -> miette::Result<()> {
         match token.kind {
-            TokenKind::False => self.chunk.push_opcode(OpCode::OpFalse),
-            TokenKind::True => self.chunk.push_opcode(OpCode::OpTrue),
-            TokenKind::Nil => self.chunk.push_opcode(OpCode::OpNil),
-            TokenKind::Number(n) => self.chunk.push_const(Value::Number(n)),
-            TokenKind::TString => self.chunk.push_const(Value::String(token.to_string())),
+            TokenKind::False => self.fun.code.push_opcode(OpCode::OpFalse),
+            TokenKind::True => self.fun.code.push_opcode(OpCode::OpTrue),
+            TokenKind::Nil => self.fun.code.push_opcode(OpCode::OpNil),
+            TokenKind::Number(n) => self.fun.code.push_const(Value::Number(n)),
+            TokenKind::TString => self.fun.code.push_const(Value::String(token.to_string())),
             _ => unreachable!("By the callee"),
         }
         Ok(())
@@ -899,7 +996,7 @@ impl<'de> Parser<'de> {
         let _ = self
             .lexer
             .expect(TokenKind::Semicolon, "Expected ';' after value.")?;
-        self.chunk.push_opcode(OpCode::OpPrint);
+        self.fun.code.push_opcode(OpCode::OpPrint);
         Ok(())
     }
 }
@@ -916,10 +1013,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -930,10 +1027,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -946,10 +1043,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -962,10 +1059,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -978,10 +1075,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -994,10 +1091,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1016,10 +1113,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1038,10 +1135,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1068,10 +1165,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1082,10 +1179,10 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1094,13 +1191,13 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_value(Value::String("eita".to_string()));
         expected.push_const(Value::Number(1.));
-        expected.push_defvar(OpCode::OpDefGlobal(0));
+        expected.push_defvar(OpCode::OpDefGlobal(1));
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1109,20 +1206,18 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_value(Value::String("eita".to_string()));
         expected.push_const(Value::Number(1.));
-        expected.push_defvar(OpCode::OpDefGlobal(0));
+        expected.push_defvar(OpCode::OpDefGlobal(1));
         // We have to add "eita" again since everytime a variable
         // is encountered we add it to the constants table
         expected.push_value(Value::String("eita".to_string()));
-        expected.push_getvar(OpCode::OpGetGlobal(2));
+        expected.push_getvar(OpCode::OpGetGlobal(3));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        println!("{}", expected);
-        println!("{}", chunk);
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1131,18 +1226,18 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_value(Value::String("eita".to_string()));
         expected.push_const(Value::Number(1.));
-        expected.push_defvar(OpCode::OpDefGlobal(0));
+        expected.push_defvar(OpCode::OpDefGlobal(1));
         // We have to add "eita" again since everytime a variable
         // is encountered we add it to the constants table
         expected.push_value(Value::String("eita".to_string()));
-        expected.push_getvar(OpCode::OpGetGlobal(2));
+        expected.push_getvar(OpCode::OpGetGlobal(3));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1150,16 +1245,15 @@ mod tests {
         let source = "{var eita = 1; print eita;}";
         let mut expected = Chunk::new();
         expected.push_const(Value::Number(1.));
-        expected.push_getvar(OpCode::OpGetLocal(0));
+        expected.push_getvar(OpCode::OpGetLocal(1));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 
     #[test]
@@ -1168,18 +1262,17 @@ mod tests {
         let mut expected = Chunk::new();
         expected.push_const(Value::Number(1.));
         expected.push_const(Value::String("value".to_string()));
-        expected.push_getvar(OpCode::OpGetLocal(1));
+        expected.push_getvar(OpCode::OpGetLocal(2));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
-        expected.push_getvar(OpCode::OpGetLocal(0));
+        expected.push_getvar(OpCode::OpGetLocal(1));
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut chunk = Chunk::new();
-        let mut parser = Parser::new(&source, &mut chunk);
+        let mut fun = Function::new();
+        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
         let _ = parser.compile().unwrap();
-
-        assert_eq!(expected, chunk);
+        assert_eq!(expected, fun.code);
     }
 }

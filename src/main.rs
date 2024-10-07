@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use loxr::value::Function;
 use loxr::{Chunk, OpCode, Value, Vm};
 use miette::{IntoDiagnostic, WrapErr};
 use std::fs;
@@ -33,7 +34,7 @@ fn main() -> miette::Result<()> {
             let mut vm = Vm::new();
             vm.compile(&file_contents)?;
 
-            println!("{}", vm.code);
+            println!("{}", vm.code());
             Ok(())
         }
         Commands::Interpret { filename } => {
@@ -54,7 +55,7 @@ fn main() -> miette::Result<()> {
 
             let mut vm = Vm::new().with_debug();
             vm.compile(&file_contents)?;
-            println!("{}", vm.code);
+            println!("{}", vm.code());
             vm.run()?;
             Ok(())
         }
@@ -71,18 +72,17 @@ fn main() -> miette::Result<()> {
             Ok(())
         }
         Commands::Chunk => {
-            let mut chunks = Chunk::new();
-            chunks.push_const(Value::Number(1.));
-            chunks.push_const(Value::Number(5.));
-            chunks.push_opcode(OpCode::OpAdd);
-            chunks.push_const(Value::Number(6.));
-            chunks.push_opcode(OpCode::OpMultiply);
+            let mut fun = Function::new();
+            fun.code.push_const(Value::Number(1.));
+            fun.code.push_const(Value::Number(5.));
+            fun.code.push_opcode(OpCode::OpAdd);
+            fun.code.push_const(Value::Number(6.));
+            fun.code.push_opcode(OpCode::OpMultiply);
+            fun.code.push_opcode(OpCode::OpReturn);
 
-            chunks.push_opcode(OpCode::OpReturn);
+            println!("{}", fun.code);
 
-            println!("{}", chunks);
-
-            let mut vm = Vm::with_chunk(chunks).with_debug();
+            let mut vm = Vm::with_fun(fun).with_debug();
             vm.run()?;
             Ok(())
         }

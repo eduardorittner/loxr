@@ -18,6 +18,7 @@ pub enum OpCode {
     OpPrint,
     OpPop,
 
+    OpCall(u8),
     OpConstant(u32),
     OpDefGlobal(u32),
     OpGetGlobal(u32),
@@ -45,6 +46,7 @@ impl std::fmt::Display for OpCode {
             OpCode::OpLess => write!(f, "OP_LESS"),
             OpCode::OpPrint => write!(f, "OP_PRINT"),
             OpCode::OpPop => write!(f, "OP_POP"),
+            OpCode::OpCall(_) => write!(f, "OP_CALL"),
             OpCode::OpConstant(_) => write!(f, "OP_CONSTANT"),
             OpCode::OpDefGlobal(_) => write!(f, "OP_DEF_GLOBAL"),
             OpCode::OpGetGlobal(_) => write!(f, "OP_GET_GLOBAL"),
@@ -64,7 +66,7 @@ impl std::fmt::Display for Chunk {
             "PC", "OP CODE", "OPERAND"
         )?;
 
-        let mut code = self.code.clone().into_iter().enumerate();
+        let code = self.code.clone().into_iter().enumerate();
         for (index, byte) in code {
             let _ = write!(f, "{:04} | ", index);
             let _ = match byte {
@@ -105,6 +107,14 @@ impl std::fmt::Display for Chunk {
                     writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpPrint), "")
                 }
                 OpCode::OpPop => writeln!(f, "{:<20} | {:10} |", format!("{}", OpCode::OpPop), ""),
+                OpCode::OpCall(i) => {
+                    writeln!(
+                        f,
+                        "{:<20} | {:10} |",
+                        format!("{}", OpCode::OpCall(i)),
+                        format!("{}", i)
+                    )
+                }
                 OpCode::OpConstant(i) => writeln!(
                     f,
                     "{:<20} | {:<10} | {}",
@@ -164,7 +174,6 @@ impl std::fmt::Display for Chunk {
 pub struct Chunk {
     code: Vec<OpCode>,
     values: Vec<Value>,
-    pc: usize,
 }
 
 impl Default for Chunk {
@@ -175,11 +184,20 @@ impl Default for Chunk {
 
 impl Chunk {
     pub fn new() -> Self {
+        let mut values = Vec::new();
+        values.push(Value::Nil);
         Self {
             code: Vec::with_capacity(64),
-            values: Vec::with_capacity(16),
-            pc: 0,
+            values,
         }
+    }
+
+    pub fn get_op(&self, pc: usize) -> OpCode {
+        self.code[pc]
+    }
+
+    pub fn len(&self) -> usize {
+        self.code.len()
     }
 
     pub fn push_opcode(&mut self, c: OpCode) {
@@ -223,15 +241,6 @@ impl Chunk {
         assert!(matches!(c, OpCode::OpJump(_) | OpCode::OpJumpIfFalse(_)));
         self.push_opcode(c);
         self.code.len() - 1
-    }
-
-    pub fn jump(&mut self, jump: i32) {
-        if jump < 0 {
-            // Jump from the last executed instruction
-            self.pc -= 1 + jump.unsigned_abs() as usize;
-        } else {
-            self.pc += jump as usize;
-        }
     }
 
     pub fn get_const(&self, i: u32) -> Option<Value> {
@@ -279,22 +288,5 @@ impl Chunk {
 
     pub fn push_return(&mut self) {
         self.push_opcode(OpCode::OpReturn);
-    }
-
-    pub fn pc(&self) -> usize {
-        self.pc
-    }
-
-    pub fn current_op(&self) -> OpCode {
-        self.code[self.pc]
-    }
-}
-
-impl Iterator for Chunk {
-    type Item = OpCode;
-    fn next(&mut self) -> Option<Self::Item> {
-        let op = self.code.get(self.pc).cloned();
-        self.pc += 1;
-        op
     }
 }

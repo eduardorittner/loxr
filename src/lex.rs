@@ -166,9 +166,9 @@ impl fmt::Display for Token<'_> {
 }
 
 pub struct Lexer<'de> {
-    whole: &'de str,
+    pub whole: &'de str,
     rest: &'de str,
-    offset: usize,
+    pub offset: usize,
     peeked: Option<Result<Token<'de>, miette::Error>>,
 }
 
@@ -180,6 +180,16 @@ impl<'de> Lexer<'de> {
             offset: 0,
             peeked: None,
         }
+    }
+
+    pub fn source(&self) -> String {
+        self.whole.to_string()
+    }
+
+    pub fn sync(&mut self, offset: usize) {
+        self.offset += offset;
+        self.rest = &self.whole[self.offset..];
+        self.peeked = None;
     }
 
     pub fn expect_number(&mut self, unexpected: &str) -> miette::Result<Token<'de>> {
@@ -210,7 +220,6 @@ impl<'de> Lexer<'de> {
         }
     }
 
-    // TODO: this is wrong
     pub fn peek(&mut self) -> Option<&Result<Token<'de>, miette::Error>> {
         if self.peeked.is_some() {
             return self.peeked.as_ref();
@@ -218,6 +227,10 @@ impl<'de> Lexer<'de> {
 
         self.peeked = self.next();
         self.peeked.as_ref()
+    }
+
+    pub fn rest(&self) -> &str {
+        self.rest
     }
 }
 

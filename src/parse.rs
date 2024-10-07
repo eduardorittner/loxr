@@ -1,5 +1,5 @@
-use crate::value::{Function, FunctionType};
-use crate::{lex::Token, lex::TokenKind, Chunk, Lexer, OpCode, Value};
+use crate::value::Function;
+use crate::{lex::Token, lex::TokenKind, Lexer, OpCode, Value};
 use miette::LabeledSpan;
 use std::collections::HashMap;
 
@@ -15,7 +15,6 @@ struct ParseRule<'de, 'fun> {
 pub struct Parser<'de, 'fun> {
     lexer: Lexer<'de>,
     fun: &'fun mut Function,
-    fn_type: FunctionType,
     rules: HashMap<TokenKind, ParseRule<'de, 'fun>>,
     scope: Scope<'de>,
 }
@@ -35,12 +34,11 @@ struct Scope<'de> {
 
 impl<'de> Scope<'de> {
     fn new() -> Self {
-        let mut locals = Vec::new();
-        locals.push(Local {
+        let locals = vec![Local {
             name: "reserved",
             depth: 0,
             defined: true,
-        });
+        }];
         Self {
             locals,
             scope_depth: 0,
@@ -89,35 +87,15 @@ enum Precedence {
     Factor,     // * /
     Unary,      // ! -
     Call,       // . ()
-    Primary,
-}
-
-impl Precedence {
-    fn next(&self) -> Self {
-        use Precedence::*;
-        match *self {
-            None => Assignment,
-            Assignment => Or,
-            Or => And,
-            And => Equality,
-            Equality => Comparison,
-            Comparison => Term,
-            Term => Factor,
-            Factor => Unary,
-            Unary => Call,
-            Call => Primary,
-            Primary => None,
-        }
-    }
+                // Primary,
 }
 
 impl<'de, 'fun> Parser<'de, 'fun> {
-    pub fn new(source: &'de str, fun: &'fun mut Function, fn_type: FunctionType) -> Self {
+    pub fn new(source: &'de str, fun: &'fun mut Function) -> Self {
         use TokenKind::*;
         Parser {
             lexer: Lexer::new(source),
             fun,
-            fn_type,
             scope: Scope::new(),
             rules: HashMap::from([
                 (
@@ -428,7 +406,7 @@ impl<'de, 'fun> Parser<'de, 'fun> {
             .rev()
             .take_while(|x| x.depth == self.scope.scope_depth);
 
-        let n = local_vars.fold(0, |acc: usize, x| {
+        let n = local_vars.fold(0, |acc: usize, _| {
             self.fun.code.push_opcode(OpCode::OpPop);
             acc + 1
         });
@@ -487,11 +465,10 @@ impl<'de, 'fun> Parser<'de, 'fun> {
     }
 
     fn parse_fun(&mut self) -> miette::Result<usize> {
-        let offset;
         let mut fun = Function::new();
         // TODO: please dont copy the whole source code for every function invocation
         let source = self.lexer.source();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Function);
+        let mut parser = Parser::new(&source, &mut fun);
         parser.lexer.sync(self.lexer.offset);
         parser.scope.begin_scope();
         parser
@@ -507,7 +484,7 @@ impl<'de, 'fun> Parser<'de, 'fun> {
 
         parser.parse_block()?;
 
-        offset = parser.lexer.offset;
+        let offset = parser.lexer.offset;
         self.fun.code.push_const(Value::Fun(fun));
         Ok(offset)
     }
@@ -791,7 +768,6 @@ impl<'de, 'fun> Parser<'de, 'fun> {
     }
 
     fn parse_block(&mut self) -> miette::Result<()> {
-        let token = self.lexer.peek();
         loop {
             let token = self.lexer.peek();
             match token {
@@ -884,7 +860,7 @@ impl<'de, 'fun> Parser<'de, 'fun> {
         Ok(())
     }
 
-    fn parse_call(&mut self, a: Token, _: bool) -> miette::Result<()> {
+    fn parse_call(&mut self, _: Token, _: bool) -> miette::Result<()> {
         let n_args = self.parse_args()?;
         self.fun.code.push_opcode(OpCode::OpCall(n_args));
         Ok(())
@@ -1003,7 +979,8 @@ impl<'de, 'fun> Parser<'de, 'fun> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::value::Function;
+    use crate::*;
 
     #[test]
     fn parse_number() {
@@ -1013,8 +990,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1027,8 +1004,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1043,8 +1020,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1059,8 +1036,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1075,8 +1052,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1091,8 +1068,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1113,8 +1090,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1135,8 +1112,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1165,8 +1142,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1179,8 +1156,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1194,8 +1171,8 @@ mod tests {
         expected.push_defvar(OpCode::OpDefGlobal(1));
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1214,8 +1191,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1234,8 +1211,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPrint);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1250,8 +1227,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }
@@ -1270,8 +1247,8 @@ mod tests {
         expected.push_opcode(OpCode::OpPop);
         expected.push_opcode(OpCode::OpReturn);
 
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&source, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(&source, &mut fun);
         let _ = parser.compile().unwrap();
         assert_eq!(expected, fun.code);
     }

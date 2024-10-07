@@ -1,6 +1,6 @@
 use crate::chunk::Chunk;
-use crate::value::{Function, FunctionType};
-use crate::{Lexer, OpCode, Parser, Value};
+use crate::value::Function;
+use crate::{OpCode, Parser, Value};
 use std::collections::HashMap;
 use std::io;
 use std::io::Cursor;
@@ -81,8 +81,7 @@ where
 
 impl Vm<Cursor<Vec<u8>>> {
     pub fn test() -> Self {
-        let mut stack = Vec::new();
-        stack.push(Value::Nil); // Reserved for the vm
+        let stack = vec![Value::Nil]; // Reserved for the vm
         Self {
             call_stack: CallStack::new(),
             debug: false,
@@ -135,8 +134,7 @@ impl Vm<Stdout> {
             pc: 0,
             frame: 0,
         });
-        let mut stack = Vec::new();
-        stack.push(Value::Nil); // Reserved for the vm
+        let stack = vec![Value::Nil]; // Reserved value
         Self {
             call_stack,
             debug: false,
@@ -183,8 +181,8 @@ impl<T: Write> Vm<T> {
     }
 
     pub fn compile(&mut self, file_contents: &str) -> miette::Result<()> {
-        let mut fun = Function::new();
-        let mut parser = Parser::new(&file_contents, &mut fun, FunctionType::Script);
+        let mut fun = Function::new_script();
+        let mut parser = Parser::new(file_contents, &mut fun);
         parser.compile()?;
         self.call_stack.push(CallFrame {
             fun: fun.clone(),
@@ -381,7 +379,7 @@ impl<T: Write> Vm<T> {
             let instr = stack.pc;
             // TODO keep a instruction index -> source code line map so we can print
             // which line the error was on
-            if stack.fun.code.len() != 0 {
+            if stack.fun.code.is_empty() {
                 eprint!("instruction: {} in ", stack.fun.code.get_op(instr));
                 match &stack.fun.name {
                     Some(name) => eprintln!("{}", name),

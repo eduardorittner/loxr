@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn string() {
         let source_code = "\"This is a string!\"";
-        let mut lexer = Lexer::new(&source_code);
+        let mut lexer = Lexer::new(source_code);
         let str = lexer.next().unwrap().unwrap();
         let token = Token {
             kind: TokenKind::TString,
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn unterminated_string() {
         let source_code = "\"Unterminated!";
-        let mut lexer = Lexer::new(&source_code);
+        let mut lexer = Lexer::new(source_code);
         let str = lexer.next().unwrap();
         assert!(str.is_err());
     }
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn two_strings() {
         let source_code = "\"first\" \"second\"";
-        let mut lexer = Lexer::new(&source_code);
+        let mut lexer = Lexer::new(source_code);
         let first = lexer.next().unwrap().unwrap();
         let token = Token {
             kind: TokenKind::TString,

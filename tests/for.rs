@@ -1,11 +1,10 @@
-use loxr::Value;
 use loxr::Vm;
 
 #[test]
 fn endless_for() {
     let mut vm = Vm::test();
     let source_code = "for(;;) { print 1; }";
-    vm.compile(&source_code).unwrap();
+    vm.compile(source_code).unwrap();
     println!("{}", vm.code());
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
@@ -20,7 +19,7 @@ fn endless_for() {
 fn endless_for_with_var() {
     let mut vm = Vm::test();
     let source_code = "for(var i = 2;;) { print i; }";
-    vm.compile(&source_code).unwrap();
+    vm.compile(source_code).unwrap();
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();
@@ -34,7 +33,7 @@ fn endless_for_with_var() {
 fn endless_for_with_incr_var() {
     let mut vm = Vm::test();
     let source_code = "for (var i = 0;; i = i + 1) { print i; }";
-    vm.compile(&source_code).unwrap();
+    vm.compile(source_code).unwrap();
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();
@@ -48,7 +47,7 @@ fn endless_for_with_incr_var() {
 fn for_always_true() {
     let mut vm = Vm::test();
     let source_code = "for (var i = 0; true;) { print i; }";
-    vm.compile(&source_code).unwrap();
+    vm.compile(source_code).unwrap();
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();
@@ -62,7 +61,7 @@ fn for_always_true() {
 fn for_i_lt_10() {
     let mut vm = Vm::test();
     let source_code = "for (var i = 0; i < 10; i = i + 1) { print i; }";
-    vm.compile(&source_code).unwrap();
+    vm.compile(source_code).unwrap();
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();

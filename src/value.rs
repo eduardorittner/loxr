@@ -40,16 +40,17 @@ impl fmt::Display for Value {
     }
 }
 
-pub enum FunctionType {
-    Function,
-    Script,
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct Function {
     pub name: Option<String>,
     pub code: Chunk,
     pub arity: u8,
+}
+
+impl Default for Function {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Function {

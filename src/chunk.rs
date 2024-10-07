@@ -1,3 +1,4 @@
+#![allow(clippy::format_in_format_args)]
 use crate::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -184,8 +185,7 @@ impl Default for Chunk {
 
 impl Chunk {
     pub fn new() -> Self {
-        let mut values = Vec::new();
-        values.push(Value::Nil);
+        let values = vec![Value::Nil];
         Self {
             code: Vec::with_capacity(64),
             values,
@@ -198,6 +198,10 @@ impl Chunk {
 
     pub fn len(&self) -> usize {
         self.code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.code.len() == 0
     }
 
     pub fn push_opcode(&mut self, c: OpCode) {

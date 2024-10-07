@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use loxr::value::Function;
-use loxr::{Chunk, OpCode, Value, Vm};
+use loxr::{OpCode, Value, Vm};
 use miette::{IntoDiagnostic, WrapErr};
 use std::fs;
 use std::io::Write;

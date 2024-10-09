@@ -34,6 +34,7 @@ fn endless_for_with_incr_var() {
     let mut vm = Vm::test();
     let source_code = "for (var i = 0;; i = i + 1) { print i; }";
     vm.compile(source_code).unwrap();
+    println!("{}", vm.code());
     let _ = vm.run_exact(100).unwrap(); // Should be enough to confirm it never breaks out of the loop
 
     let result = vm.read_out();

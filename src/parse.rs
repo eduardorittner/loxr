@@ -660,6 +660,7 @@ impl<'de, 'fun> Parser<'de, 'fun> {
         // Main loop body is right after initializer expression
         let mut loop_start = self.fun.code.last_op();
 
+        println!("code start {}", loop_start);
         let mut break_jump: Option<usize> = None;
 
         let token = self.lexer.peek().unwrap().as_ref().unwrap();
@@ -764,7 +765,9 @@ impl<'de, 'fun> Parser<'de, 'fun> {
     }
 
     fn patch_jump(&mut self, from: usize) {
-        self.fun.code.patch_jump(from, self.fun.code.last_op());
+        self.fun
+            .code
+            .patch_jump(from, self.fun.code.last_op().saturating_sub(1));
     }
 
     fn parse_block(&mut self) -> miette::Result<()> {

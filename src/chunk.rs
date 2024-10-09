@@ -257,7 +257,7 @@ impl Chunk {
     }
 
     pub fn last_op(&self) -> usize {
-        self.code.len().saturating_sub(1)
+        self.code.len()
     }
 
     pub fn next_op(&self) -> usize {
@@ -281,7 +281,7 @@ impl Chunk {
     }
 
     pub fn push_loop(&mut self, loop_index: usize) {
-        let index = self.last_op() + 1;
+        let index = self.last_op();
         assert!(
             index > loop_index,
             "Loop index must be smaller than index! Dummy"

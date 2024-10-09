@@ -192,7 +192,7 @@ impl<T: Write> Vm<T> {
         self.call_fun(Value::Fun(fun), 0)
     }
 
-    pub fn run_once(&mut self) -> miette::Result<bool> {
+    pub fn run_once(&mut self) -> miette::Result<Option<Value>> {
         if self.debug {
             self.print_stack();
             let _ = self.out.write_fmt(format_args!(
@@ -203,7 +203,10 @@ impl<T: Write> Vm<T> {
         }
 
         match self.call_stack.step() {
-            OpCode::OpReturn => return Ok(true),
+            OpCode::OpReturn => match self.stack.pop() {
+                Some(v) => return Ok(Some(v)),
+                None => return Ok(Some(Value::Nil)),
+            },
             OpCode::OpNot => {
                 let a = self.stack.last_mut().expect("Stack empty");
                 *a = Value::Bool(a.is_falsey());
@@ -347,9 +350,13 @@ impl<T: Write> Vm<T> {
             }
             OpCode::OpJump(jump) => self.call_stack.jump(jump),
         }
-        Ok(false)
+        Ok(None)
     }
 
+    /// Used for testing infinite loops
+    ///
+    /// Instead of running the test for a defined ammount of time, just run N steps where
+    /// N is very large and see if it terminates before that
     pub fn run_exact(&mut self, ops: usize) -> miette::Result<Value> {
         for _ in 0..ops {
             self.run_once()?;
@@ -357,21 +364,17 @@ impl<T: Write> Vm<T> {
         self.stack.pop().ok_or(miette::miette!("whatever"))
     }
 
-    pub fn run(&mut self) -> miette::Result<()> {
+    pub fn run(&mut self) -> miette::Result<Value> {
         loop {
             match self.run_once() {
-                Ok(b) => {
-                    if b {
-                        break;
-                    }
-                }
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => (),
                 Err(e) => {
                     self.stack_trace();
                     return Err(e);
                 }
             }
         }
-        Ok(())
     }
 
     pub fn stack_trace(&mut self) {
@@ -422,7 +425,7 @@ mod tests {
         fun.code.push_const(Value::String("string".to_string()));
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(1).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::String("string".to_string()))
     }
 
@@ -445,7 +448,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpAdd);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(3).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(2.))
     }
 
@@ -457,7 +460,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpSubtract);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(3).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(3.))
     }
 
@@ -468,7 +471,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpNegate);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(2).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(-5.))
     }
 
@@ -480,7 +483,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpMultiply);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(3).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(10.))
     }
 
@@ -492,7 +495,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpDivide);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(3).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(2.))
     }
 
@@ -504,7 +507,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpEq);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Bool(true))
     }
 
@@ -516,7 +519,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpEq);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Bool(false))
     }
 
@@ -528,7 +531,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpEq);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Bool(true))
     }
 
@@ -556,7 +559,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpNot);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(9).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Bool(true))
     }
 
@@ -568,7 +571,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpAdd);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::String("Hello, world!".to_string()))
     }
 
@@ -580,7 +583,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpAdd);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4);
+        let res = vm.run();
         assert!(res.is_err())
     }
 
@@ -595,7 +598,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpMultiply);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(5).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(5.));
     }
 
@@ -632,7 +635,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpMultiply);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(4).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Number(20.));
     }
 
@@ -651,7 +654,7 @@ mod tests {
         fun.code.push_opcode(OpCode::OpEq);
         fun.code.push_opcode(OpCode::OpReturn);
         let mut vm = Vm::with_fun(fun);
-        let res = vm.run_exact(9).unwrap();
+        let res = vm.run().unwrap();
         assert_eq!(res, Value::Bool(true));
     }
 }

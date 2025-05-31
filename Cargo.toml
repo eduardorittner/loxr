@@ -2,3 +2,12 @@
 name = "loxr"
 version = "0.1.0"
 edition = "2024"
+
+[workspace]
+members = [ ".", "ast", "lex" , "parse", "vm-ast"]
+
+[dependencies]
+lex = { path = "./lex" }
+parse = { path = "./parse" }
+vm_ast = { path = "./vm-ast" }
+ast = { path = "./ast" }
